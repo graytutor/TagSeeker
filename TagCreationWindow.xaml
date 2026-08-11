@@ -1,0 +1,40 @@
+<Window x:Class="CustomImageViewer.TagCreationWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="태그 추가" Width="470" Height="225"
+        WindowStartupLocation="CenterOwner" ResizeMode="NoResize"
+        Background="#15181E" Foreground="#F2F4F7">
+    <Window.Resources>
+        <Style TargetType="Button">
+            <Setter Property="Padding" Value="12,7"/>
+            <Setter Property="Margin" Value="3"/>
+            <Setter Property="Background" Value="#2A2E36"/>
+            <Setter Property="Foreground" Value="#F4F4F5"/>
+            <Setter Property="BorderBrush" Value="#3A404A"/>
+        </Style>
+        <Style TargetType="TextBox">
+            <Setter Property="Background" Value="#1C2027"/>
+            <Setter Property="Foreground" Value="#F4F4F5"/>
+            <Setter Property="BorderBrush" Value="#3A404A"/>
+            <Setter Property="CaretBrush" Value="White"/>
+            <Setter Property="Padding" Value="9,7"/>
+        </Style>
+    </Window.Resources>
+
+    <Grid Margin="18">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <TextBlock x:Name="TitleText" FontSize="19" FontWeight="SemiBold"/>
+        <TextBlock Grid.Row="1" Margin="0,7,0,12" Foreground="#AEB6C2"
+                   Text="새 태그를 입력하세요. 여러 태그는 쉼표로 구분할 수 있습니다."/>
+        <TextBox x:Name="TagTextBox" Grid.Row="2" KeyDown="TagTextBox_KeyDown"/>
+        <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,14,0,0">
+            <Button Content="취소" Click="Cancel_Click"/>
+            <Button Content="추가" Click="Add_Click" Background="#245A8D" BorderBrush="#4B9AE8"/>
+        </StackPanel>
+    </Grid>
+</Window>

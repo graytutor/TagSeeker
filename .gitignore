@@ -1,0 +1,25 @@
+# Visual Studio and build output
+.vs/
+bin/
+obj/
+.dotnet_cli/
+*.user
+*.suo
+*.pdb
+
+# Release artifacts are uploaded through GitHub Releases
+releases/
+installer/output/
+*.zip
+
+# Local application data and caches
+settings.json
+tags.db
+tags.db-*
+*.cache
+*.log
+
+# OS-generated files
+Thumbs.db
+Desktop.ini
+.DS_Store
