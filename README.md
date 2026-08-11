@@ -1,14 +1,14 @@
 # TagSeeker
 
 TagSeeker is a fast Windows image viewer and library manager designed for large image collections.
-It combines thumbnail-based folder browsing, flexible tags, author filtering, multi-format image viewing, OCR, and translation in one desktop application.
+It combines thumbnail-based folder browsing, flexible tags, prefix filtering, multi-format image viewing, OCR, and translation in one desktop application.
 
 ## 주요 기능
 
 - 대규모 폴더를 위한 페이지 기반 미리보기와 썸네일 캐시
 - PNG, JPEG, WebP, GIF, TIFF, TGA 등 다양한 이미지 형식 지원
-- 파일과 폴더에 여러 태그 적용 및 AND/OR 태그 모아보기
-- 폴더명 앞의 `[작가]` 또는 `【작가】`를 이용한 작가 자동 필터
+- 작업별 태그 세트 분리, 파일과 폴더에 여러 태그 적용 및 AND/OR 태그 모아보기
+- 폴더명 앞의 `[...]`, `(...)`, `**...**` 등 다양한 접두어를 이용한 자동 필터와 사용자 지정 접두어 형식
 - 이름, 날짜, 형식, 크기 정렬과 폴더 우선 표시
 - 탐색기 방식의 다중 선택, 앞/뒤 이동, 복사, 이동, 이름 변경 및 삭제
 - 여러 이미지 맞춤 보기 모드와 키보드·마우스 탐색

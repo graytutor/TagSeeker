@@ -1,8 +1,12 @@
 using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Threading;
 using CustomImageViewer.Services;
+using CustomImageViewer.Models;
 using Microsoft.Win32;
 using System.Diagnostics;
 using System.IO;
+using System.Collections.ObjectModel;
 
 namespace CustomImageViewer;
 
@@ -11,6 +15,7 @@ public partial class SettingsWindow : Window
     private readonly ThumbnailCacheStore _thumbnailCacheStore;
     private readonly TagStore _tagStore;
     private readonly AppSettings _settings;
+    private readonly ObservableCollection<PrefixPattern> _prefixPatterns;
     public int ExplorerPageSize { get; private set; }
     public int MouseWheelSpeedMultiplier { get; private set; }
     public int ExplorerSortField { get; private set; }
@@ -21,6 +26,7 @@ public partial class SettingsWindow : Window
     public int ThumbnailCacheMaxMegabytes { get; private set; }
     public bool TagAutoBackupEnabled { get; private set; }
     public int TagBackupRetentionCount { get; private set; }
+    public IReadOnlyList<PrefixPattern> PrefixPatterns { get; private set; } = [];
     public bool TagDataChanged { get; private set; }
 
     public SettingsWindow(
@@ -32,6 +38,9 @@ public partial class SettingsWindow : Window
         _thumbnailCacheStore = thumbnailCacheStore;
         _tagStore = tagStore;
         InitializeComponent();
+        _prefixPatterns = new ObservableCollection<PrefixPattern>(
+            (settings.PrefixPatterns ?? PrefixPattern.CreateDefaults()).Select(pattern => pattern.Clone()));
+        PrefixPatternGrid.ItemsSource = _prefixPatterns;
         PageSizeBox.Text = Math.Clamp(settings.ExplorerPageSize, 100, 1000).ToString();
         WheelSpeedBox.SelectedIndex = Math.Clamp(settings.MouseWheelSpeedMultiplier, 1, 5) - 1;
         SortFieldBox.SelectedIndex = Math.Clamp(settings.ExplorerSortField, 0, 4);
@@ -73,6 +82,29 @@ public partial class SettingsWindow : Window
             return;
         }
 
+        foreach (var pattern in _prefixPatterns)
+        {
+            if (string.IsNullOrWhiteSpace(pattern.Opening) || string.IsNullOrWhiteSpace(pattern.Closing))
+            {
+                MessageBox.Show(this, "접두어의 여는 기호와 닫는 기호를 모두 입력하세요.", "접두어 설정",
+                    MessageBoxButton.OK, MessageBoxImage.Information);
+                PrefixPatternGrid.SelectedItem = pattern;
+                PrefixPatternGrid.ScrollIntoView(pattern);
+                return;
+            }
+        }
+
+        var duplicate = _prefixPatterns
+            .GroupBy(pattern => (pattern.Opening, pattern.Closing))
+            .FirstOrDefault(group => group.Count() > 1);
+        if (duplicate is not null)
+        {
+            MessageBox.Show(this,
+                $"같은 접두어 형식이 중복되어 있습니다: {duplicate.Key.Opening}내용{duplicate.Key.Closing}",
+                "접두어 설정", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
         ExplorerPageSize = pageSize;
         MouseWheelSpeedMultiplier = Math.Clamp(WheelSpeedBox.SelectedIndex + 1, 1, 5);
         ExplorerSortField = Math.Clamp(SortFieldBox.SelectedIndex, 0, 4);
@@ -83,7 +115,37 @@ public partial class SettingsWindow : Window
         ThumbnailCacheMaxMegabytes = cacheSize;
         TagAutoBackupEnabled = TagAutoBackupCheckBox.IsChecked == true;
         TagBackupRetentionCount = retentionCount;
+        PrefixPatterns = _prefixPatterns.Select(pattern => pattern.Clone()).ToList();
         DialogResult = true;
+    }
+
+    private void AddPrefixPattern_Click(object sender, RoutedEventArgs e)
+    {
+        var pattern = new PrefixPattern();
+        _prefixPatterns.Add(pattern);
+        PrefixPatternGrid.SelectedItem = pattern;
+        PrefixPatternGrid.ScrollIntoView(pattern);
+        Dispatcher.BeginInvoke(() =>
+        {
+            PrefixPatternGrid.CurrentCell = new DataGridCellInfo(pattern, PrefixPatternGrid.Columns[0]);
+            PrefixPatternGrid.BeginEdit();
+        }, DispatcherPriority.Input);
+    }
+
+    private void DeletePrefixPattern_Click(object sender, RoutedEventArgs e)
+    {
+        if (PrefixPatternGrid.SelectedItem is PrefixPattern pattern)
+            _prefixPatterns.Remove(pattern);
+    }
+
+    private void ResetPrefixPatterns_Click(object sender, RoutedEventArgs e)
+    {
+        if (MessageBox.Show(this, "접두어 형식을 기본 목록으로 되돌릴까요?", "접두어 설정",
+                MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
+
+        _prefixPatterns.Clear();
+        foreach (var pattern in PrefixPattern.CreateDefaults())
+            _prefixPatterns.Add(pattern);
     }
 
     private async void ClearCache_Click(object sender, RoutedEventArgs e)
@@ -269,7 +331,9 @@ public partial class SettingsWindow : Window
                 ExplorerFoldersFirst = FoldersFirstCheckBox.IsChecked == true,
                 TargetLanguageCode = TargetLanguageBox.SelectedValue?.ToString() ?? "ko",
                 TagAutoBackupEnabled = TagAutoBackupCheckBox.IsChecked == true,
-                TagBackupRetentionCount = int.TryParse(TagBackupRetentionBox.Text, out var retention) ? retention : 10
+                TagBackupRetentionCount = int.TryParse(TagBackupRetentionBox.Text, out var retention) ? retention : 10,
+                ActiveTagSetId = _settings.ActiveTagSetId,
+                PrefixPatterns = _prefixPatterns.Select(pattern => pattern.Clone()).ToList()
             };
             Clipboard.SetText(AppLogService.CreateDiagnosticReport(snapshot));
             TagDataStatusText.Text = "진단 정보를 클립보드에 복사했습니다.";

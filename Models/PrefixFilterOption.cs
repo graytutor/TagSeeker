@@ -3,7 +3,7 @@ using System.Runtime.CompilerServices;
 
 namespace CustomImageViewer.Models;
 
-public sealed class AuthorFilterOption(string key, string name, int itemCount) : INotifyPropertyChanged
+public sealed class PrefixFilterOption(string key, string name, int itemCount) : INotifyPropertyChanged
 {
     private bool _isSelected;
 

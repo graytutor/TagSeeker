@@ -94,6 +94,49 @@
                 </ScrollViewer>
             </TabItem>
 
+            <TabItem Header="접두어">
+                <Grid Margin="22">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+                    <TextBlock Text="접두어 형식 관리" FontSize="18" FontWeight="SemiBold"
+                               Foreground="#70B7FF" Margin="0,0,0,8"/>
+                    <TextBlock Grid.Row="1"
+                               Text="폴더명 맨 앞에서 인식할 여는 기호와 닫는 기호를 지정합니다. 셀을 두 번 클릭하면 수정할 수 있습니다."
+                               Foreground="#B9C0CA" TextWrapping="Wrap" Margin="0,0,0,12"/>
+                    <DataGrid x:Name="PrefixPatternGrid" Grid.Row="2" AutoGenerateColumns="False"
+                              CanUserAddRows="False" CanUserDeleteRows="False" CanUserReorderColumns="False"
+                              HeadersVisibility="Column" GridLinesVisibility="Horizontal"
+                              Background="#181B21" Foreground="#F2F4F7" BorderBrush="#3A404A"
+                              RowBackground="#1C2027" AlternatingRowBackground="#222731"
+                              SelectionMode="Single" SelectionUnit="FullRow">
+                        <DataGrid.ColumnHeaderStyle>
+                            <Style TargetType="DataGridColumnHeader">
+                                <Setter Property="Background" Value="#2A2E36"/>
+                                <Setter Property="Foreground" Value="#F2F4F7"/>
+                                <Setter Property="Padding" Value="9,6"/>
+                            </Style>
+                        </DataGrid.ColumnHeaderStyle>
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="여는 기호" Width="*"
+                                                Binding="{Binding Opening, UpdateSourceTrigger=PropertyChanged}"/>
+                            <DataGridTextColumn Header="닫는 기호" Width="*"
+                                                Binding="{Binding Closing, UpdateSourceTrigger=PropertyChanged}"/>
+                            <DataGridTextColumn Header="표시 예시" Width="1.4*" IsReadOnly="True"
+                                                Binding="{Binding Example}"/>
+                        </DataGrid.Columns>
+                    </DataGrid>
+                    <DockPanel Grid.Row="3" Margin="0,9,0,0">
+                        <Button DockPanel.Dock="Right" Content="기본값 복원" Click="ResetPrefixPatterns_Click"/>
+                        <Button Content="형식 추가" Click="AddPrefixPattern_Click"/>
+                        <Button Content="선택 삭제" Click="DeletePrefixPattern_Click"/>
+                    </DockPanel>
+                </Grid>
+            </TabItem>
+
             <TabItem Header="뷰어 및 번역">
                 <Grid Margin="22">
                     <Grid.RowDefinitions>

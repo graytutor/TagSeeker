@@ -50,6 +50,8 @@ public static class AppLogService
         builder.AppendLine($"정렬: 필드={settings.ExplorerSortField}, 내림차순={settings.ExplorerSortDescending}, 폴더 우선={settings.ExplorerFoldersFirst}");
         builder.AppendLine($"번역 결과 언어: {settings.TargetLanguageCode}");
         builder.AppendLine($"자동 태그 백업: {settings.TagAutoBackupEnabled}, 보관={settings.TagBackupRetentionCount}");
+        builder.AppendLine($"활성 태그 세트 ID: {settings.ActiveTagSetId}");
+        builder.AppendLine($"접두어 형식: {settings.PrefixPatterns?.Count ?? 0}개");
         builder.AppendLine($"로그 폴더: {LogFolder}");
         return builder.ToString();
     }

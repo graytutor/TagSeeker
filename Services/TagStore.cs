@@ -7,9 +7,11 @@ namespace CustomImageViewer.Services;
 
 public sealed class TagStore
 {
+    public const long DefaultTagSetId = 1;
     private readonly string _connectionString;
     private readonly string _databasePath;
     private readonly string _backupFolder;
+    public long ActiveTagSetId { get; set; } = DefaultTagSetId;
 
     public TagStore()
     {
@@ -40,10 +42,19 @@ public sealed class TagStore
                 OriginalPath TEXT NOT NULL,
                 IsDirectory INTEGER NOT NULL
             );
-            CREATE TABLE IF NOT EXISTS Tags (
+            CREATE TABLE IF NOT EXISTS TagSets (
                 Id INTEGER PRIMARY KEY AUTOINCREMENT,
                 Name TEXT NOT NULL,
                 NormalizedName TEXT NOT NULL UNIQUE
+            );
+            INSERT OR IGNORE INTO TagSets(Id, Name, NormalizedName) VALUES(1, '기본', '기본');
+            CREATE TABLE IF NOT EXISTS Tags (
+                Id INTEGER PRIMARY KEY AUTOINCREMENT,
+                Name TEXT NOT NULL,
+                NormalizedName TEXT NOT NULL,
+                TagSetId INTEGER NOT NULL DEFAULT 1,
+                UNIQUE(TagSetId, NormalizedName),
+                FOREIGN KEY (TagSetId) REFERENCES TagSets(Id) ON DELETE CASCADE
             );
             CREATE TABLE IF NOT EXISTS ResourceTags (
                 ResourcePathKey TEXT NOT NULL,
@@ -55,6 +66,142 @@ public sealed class TagStore
             CREATE INDEX IF NOT EXISTS IX_ResourceTags_TagId ON ResourceTags(TagId);
             """;
         await command.ExecuteNonQueryAsync();
+
+        var columnCheck = connection.CreateCommand();
+        columnCheck.CommandText = "SELECT COUNT(*) FROM pragma_table_info('Tags') WHERE name = 'TagSetId';";
+        if (Convert.ToInt32(await columnCheck.ExecuteScalarAsync()) == 0)
+        {
+            var migrationBackup = Path.Combine(
+                _backupFolder,
+                $"tags-before-tagsets-{DateTime.Now:yyyyMMdd-HHmmss}.db");
+            using (var backupConnection = new SqliteConnection(new SqliteConnectionStringBuilder
+                   {
+                       DataSource = migrationBackup,
+                       Mode = SqliteOpenMode.ReadWriteCreate
+                   }.ToString()))
+            {
+                backupConnection.Open();
+                connection.BackupDatabase(backupConnection);
+            }
+
+            var migrate = connection.CreateCommand();
+            migrate.CommandText = """
+                PRAGMA foreign_keys = OFF;
+                BEGIN IMMEDIATE;
+                CREATE TABLE Tags_New (
+                    Id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    Name TEXT NOT NULL,
+                    NormalizedName TEXT NOT NULL,
+                    TagSetId INTEGER NOT NULL DEFAULT 1,
+                    UNIQUE(TagSetId, NormalizedName),
+                    FOREIGN KEY (TagSetId) REFERENCES TagSets(Id) ON DELETE CASCADE
+                );
+                INSERT INTO Tags_New(Id, Name, NormalizedName, TagSetId)
+                    SELECT Id, Name, NormalizedName, 1 FROM Tags;
+                DROP TABLE Tags;
+                ALTER TABLE Tags_New RENAME TO Tags;
+                COMMIT;
+                PRAGMA foreign_keys = ON;
+                """;
+            await migrate.ExecuteNonQueryAsync();
+        }
+
+        var indexes = connection.CreateCommand();
+        indexes.CommandText = """
+            CREATE INDEX IF NOT EXISTS IX_ResourceTags_TagId ON ResourceTags(TagId);
+            CREATE INDEX IF NOT EXISTS IX_Tags_TagSetId ON Tags(TagSetId);
+            """;
+        await indexes.ExecuteNonQueryAsync();
+    }
+
+    public async Task<IReadOnlyList<TagSetSummary>> GetTagSetsAsync()
+    {
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync();
+        var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT ts.Id, ts.Name, COUNT(t.Id)
+            FROM TagSets ts
+            LEFT JOIN Tags t ON t.TagSetId = ts.Id
+            GROUP BY ts.Id, ts.Name
+            ORDER BY ts.Name COLLATE NOCASE;
+            """;
+        var result = new List<TagSetSummary>();
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+            result.Add(new TagSetSummary(reader.GetInt64(0), reader.GetString(1), reader.GetInt32(2)));
+        return result;
+    }
+
+    public async Task<long> CreateTagSetAsync(string name)
+    {
+        var cleanName = CleanTagSetName(name);
+        if (cleanName.Length == 0) throw new ArgumentException("태그 세트 이름을 입력하세요.", nameof(name));
+
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync();
+        var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO TagSets(Name, NormalizedName) VALUES($name, $normalized)
+            ON CONFLICT(NormalizedName) DO NOTHING
+            RETURNING Id;
+            """;
+        command.Parameters.AddWithValue("$name", cleanName);
+        command.Parameters.AddWithValue("$normalized", NormalizeTagSetName(cleanName));
+        var result = await command.ExecuteScalarAsync();
+        if (result is null)
+            throw new InvalidOperationException("같은 이름의 태그 세트가 이미 있습니다.");
+        return Convert.ToInt64(result);
+    }
+
+    public async Task RenameTagSetAsync(long tagSetId, string newName)
+    {
+        var cleanName = CleanTagSetName(newName);
+        if (cleanName.Length == 0) throw new ArgumentException("태그 세트 이름을 입력하세요.", nameof(newName));
+
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync();
+        var command = connection.CreateCommand();
+        command.CommandText = "UPDATE TagSets SET Name = $name, NormalizedName = $normalized WHERE Id = $id;";
+        command.Parameters.AddWithValue("$name", cleanName);
+        command.Parameters.AddWithValue("$normalized", NormalizeTagSetName(cleanName));
+        command.Parameters.AddWithValue("$id", tagSetId);
+        try
+        {
+            await command.ExecuteNonQueryAsync();
+        }
+        catch (SqliteException ex) when (ex.SqliteErrorCode == 19)
+        {
+            throw new InvalidOperationException("같은 이름의 태그 세트가 이미 있습니다.", ex);
+        }
+    }
+
+    public async Task DeleteTagSetAsync(long tagSetId)
+    {
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync();
+        await using var transaction = connection.BeginTransaction();
+
+        var count = connection.CreateCommand();
+        count.Transaction = transaction;
+        count.CommandText = "SELECT COUNT(*) FROM TagSets;";
+        if (Convert.ToInt32(await count.ExecuteScalarAsync()) <= 1)
+            throw new InvalidOperationException("마지막 태그 세트는 삭제할 수 없습니다.");
+
+        var delete = connection.CreateCommand();
+        delete.Transaction = transaction;
+        delete.CommandText = "DELETE FROM TagSets WHERE Id = $id;";
+        delete.Parameters.AddWithValue("$id", tagSetId);
+        await delete.ExecuteNonQueryAsync();
+
+        var cleanup = connection.CreateCommand();
+        cleanup.Transaction = transaction;
+        cleanup.CommandText = """
+            DELETE FROM Resources
+            WHERE NOT EXISTS (SELECT 1 FROM ResourceTags WHERE ResourcePathKey = Resources.PathKey);
+            """;
+        await cleanup.ExecuteNonQueryAsync();
+        await transaction.CommitAsync();
     }
 
     public async Task<IReadOnlyList<string>> GetTagsAsync(string path)
@@ -66,10 +213,11 @@ public sealed class TagStore
             SELECT t.Name
             FROM ResourceTags rt
             JOIN Tags t ON t.Id = rt.TagId
-            WHERE rt.ResourcePathKey = $pathKey
+            WHERE rt.ResourcePathKey = $pathKey AND t.TagSetId = $tagSetId
             ORDER BY t.Name COLLATE NOCASE;
             """;
         command.Parameters.AddWithValue("$pathKey", NormalizePath(path));
+        command.Parameters.AddWithValue("$tagSetId", ActiveTagSetId);
 
         var result = new List<string>();
         await using var reader = await command.ExecuteReaderAsync();
@@ -100,8 +248,10 @@ public sealed class TagStore
                 FROM ResourceTags rt
                 JOIN Tags t ON t.Id = rt.TagId
                 WHERE rt.ResourcePathKey IN ({string.Join(", ", parameters)})
+                  AND t.TagSetId = $tagSetId
                 ORDER BY rt.ResourcePathKey, t.Name COLLATE NOCASE;
                 """;
+            command.Parameters.AddWithValue("$tagSetId", ActiveTagSetId);
             for (var index = 0; index < chunk.Length; index++)
                 command.Parameters.AddWithValue(parameters[index], chunk[index].Key);
 
@@ -134,9 +284,11 @@ public sealed class TagStore
             SELECT t.Name, COUNT(rt.ResourcePathKey)
             FROM Tags t
             LEFT JOIN ResourceTags rt ON rt.TagId = t.Id
+            WHERE t.TagSetId = $tagSetId
             GROUP BY t.Id, t.Name
             ORDER BY t.Name COLLATE NOCASE;
             """;
+        command.Parameters.AddWithValue("$tagSetId", ActiveTagSetId);
 
         var result = new List<TagSummary>();
         await using var reader = await command.ExecuteReaderAsync();
@@ -174,8 +326,13 @@ public sealed class TagStore
 
         var clear = connection.CreateCommand();
         clear.Transaction = transaction;
-        clear.CommandText = "DELETE FROM ResourceTags WHERE ResourcePathKey = $pathKey;";
+        clear.CommandText = """
+            DELETE FROM ResourceTags
+            WHERE ResourcePathKey = $pathKey
+              AND TagId IN (SELECT Id FROM Tags WHERE TagSetId = $tagSetId);
+            """;
         clear.Parameters.AddWithValue("$pathKey", pathKey);
+        clear.Parameters.AddWithValue("$tagSetId", ActiveTagSetId);
         await clear.ExecuteNonQueryAsync();
 
         foreach (var tag in cleanTags)
@@ -184,21 +341,24 @@ public sealed class TagStore
             var addTag = connection.CreateCommand();
             addTag.Transaction = transaction;
             addTag.CommandText = """
-                INSERT INTO Tags(Name, NormalizedName) VALUES($name, $normalized)
-                ON CONFLICT(NormalizedName) DO UPDATE SET Name = excluded.Name;
+                INSERT INTO Tags(Name, NormalizedName, TagSetId) VALUES($name, $normalized, $tagSetId)
+                ON CONFLICT(TagSetId, NormalizedName) DO UPDATE SET Name = excluded.Name;
                 """;
             addTag.Parameters.AddWithValue("$name", tag);
             addTag.Parameters.AddWithValue("$normalized", normalizedTag);
+            addTag.Parameters.AddWithValue("$tagSetId", ActiveTagSetId);
             await addTag.ExecuteNonQueryAsync();
 
             var link = connection.CreateCommand();
             link.Transaction = transaction;
             link.CommandText = """
                 INSERT OR IGNORE INTO ResourceTags(ResourcePathKey, TagId)
-                SELECT $pathKey, Id FROM Tags WHERE NormalizedName = $normalized;
+                SELECT $pathKey, Id FROM Tags
+                WHERE NormalizedName = $normalized AND TagSetId = $tagSetId;
                 """;
             link.Parameters.AddWithValue("$pathKey", pathKey);
             link.Parameters.AddWithValue("$normalized", normalizedTag);
+            link.Parameters.AddWithValue("$tagSetId", ActiveTagSetId);
             await link.ExecuteNonQueryAsync();
         }
 
@@ -229,11 +389,12 @@ public sealed class TagStore
             var addTag = connection.CreateCommand();
             addTag.Transaction = transaction;
             addTag.CommandText = """
-                INSERT INTO Tags(Name, NormalizedName) VALUES($name, $normalized)
-                ON CONFLICT(NormalizedName) DO UPDATE SET Name = excluded.Name;
+                INSERT INTO Tags(Name, NormalizedName, TagSetId) VALUES($name, $normalized, $tagSetId)
+                ON CONFLICT(TagSetId, NormalizedName) DO UPDATE SET Name = excluded.Name;
                 """;
             addTag.Parameters.AddWithValue("$name", tag);
             addTag.Parameters.AddWithValue("$normalized", NormalizeTag(tag));
+            addTag.Parameters.AddWithValue("$tagSetId", ActiveTagSetId);
             await addTag.ExecuteNonQueryAsync();
         }
 
@@ -260,10 +421,12 @@ public sealed class TagStore
                 link.Transaction = transaction;
                 link.CommandText = """
                     INSERT OR IGNORE INTO ResourceTags(ResourcePathKey, TagId)
-                    SELECT $pathKey, Id FROM Tags WHERE NormalizedName = $normalized;
+                    SELECT $pathKey, Id FROM Tags
+                    WHERE NormalizedName = $normalized AND TagSetId = $tagSetId;
                     """;
                 link.Parameters.AddWithValue("$pathKey", pathKey);
                 link.Parameters.AddWithValue("$normalized", NormalizeTag(tag));
+                link.Parameters.AddWithValue("$tagSetId", ActiveTagSetId);
                 await link.ExecuteNonQueryAsync();
             }
         }
@@ -288,11 +451,12 @@ public sealed class TagStore
             var command = connection.CreateCommand();
             command.Transaction = transaction;
             command.CommandText = """
-                INSERT INTO Tags(Name, NormalizedName) VALUES($name, $normalized)
-                ON CONFLICT(NormalizedName) DO UPDATE SET Name = excluded.Name;
+                INSERT INTO Tags(Name, NormalizedName, TagSetId) VALUES($name, $normalized, $tagSetId)
+                ON CONFLICT(TagSetId, NormalizedName) DO UPDATE SET Name = excluded.Name;
                 """;
             command.Parameters.AddWithValue("$name", tag);
             command.Parameters.AddWithValue("$normalized", NormalizeTag(tag));
+            command.Parameters.AddWithValue("$tagSetId", ActiveTagSetId);
             await command.ExecuteNonQueryAsync();
         }
         await transaction.CommitAsync();
@@ -311,15 +475,21 @@ public sealed class TagStore
         deleteLinks.Transaction = transaction;
         deleteLinks.CommandText = """
             DELETE FROM ResourceTags
-            WHERE TagId IN (SELECT Id FROM Tags WHERE NormalizedName = $normalized);
+            WHERE TagId IN (
+                SELECT Id FROM Tags WHERE NormalizedName = $normalized AND TagSetId = $tagSetId
+            );
             """;
         deleteLinks.Parameters.AddWithValue("$normalized", normalizedTag);
+        deleteLinks.Parameters.AddWithValue("$tagSetId", ActiveTagSetId);
         await deleteLinks.ExecuteNonQueryAsync();
 
         var deleteTag = connection.CreateCommand();
         deleteTag.Transaction = transaction;
-        deleteTag.CommandText = "DELETE FROM Tags WHERE NormalizedName = $normalized;";
+        deleteTag.CommandText = """
+            DELETE FROM Tags WHERE NormalizedName = $normalized AND TagSetId = $tagSetId;
+            """;
         deleteTag.Parameters.AddWithValue("$normalized", normalizedTag);
+        deleteTag.Parameters.AddWithValue("$tagSetId", ActiveTagSetId);
         await deleteTag.ExecuteNonQueryAsync();
 
         var cleanupResources = connection.CreateCommand();
@@ -361,10 +531,13 @@ public sealed class TagStore
             remove.CommandText = """
                 DELETE FROM ResourceTags
                 WHERE ResourcePathKey = $pathKey
-                  AND TagId IN (SELECT Id FROM Tags WHERE NormalizedName = $normalized);
+                  AND TagId IN (
+                      SELECT Id FROM Tags WHERE NormalizedName = $normalized AND TagSetId = $tagSetId
+                  );
                 """;
             remove.Parameters.AddWithValue("$pathKey", pathKey);
             remove.Parameters.AddWithValue("$normalized", normalizedTag);
+            remove.Parameters.AddWithValue("$tagSetId", ActiveTagSetId);
             await remove.ExecuteNonQueryAsync();
         }
 
@@ -396,11 +569,12 @@ public sealed class TagStore
         ids.Transaction = transaction;
         ids.CommandText = """
             SELECT
-                (SELECT Id FROM Tags WHERE NormalizedName = $original),
-                (SELECT Id FROM Tags WHERE NormalizedName = $newName);
+                (SELECT Id FROM Tags WHERE NormalizedName = $original AND TagSetId = $tagSetId),
+                (SELECT Id FROM Tags WHERE NormalizedName = $newName AND TagSetId = $tagSetId);
             """;
         ids.Parameters.AddWithValue("$original", originalNormalized);
         ids.Parameters.AddWithValue("$newName", newNormalized);
+        ids.Parameters.AddWithValue("$tagSetId", ActiveTagSetId);
         long? originalId = null;
         long? existingNewId = null;
         await using (var reader = await ids.ExecuteReaderAsync())
@@ -472,6 +646,7 @@ public sealed class TagStore
             JOIN Tags t ON t.Id = rt.TagId
             WHERE (r.PathKey = $root OR substr(r.PathKey, 1, length($prefix)) = $prefix)
               AND t.NormalizedName IN ({string.Join(", ", parameters)})
+              AND t.TagSetId = $tagSetId
             GROUP BY r.PathKey, r.OriginalPath, r.IsDirectory
             HAVING COUNT(DISTINCT t.NormalizedName) >= $required
             ORDER BY r.IsDirectory DESC, r.OriginalPath COLLATE NOCASE;
@@ -479,6 +654,7 @@ public sealed class TagStore
         command.Parameters.AddWithValue("$root", rootKey);
         command.Parameters.AddWithValue("$prefix", prefix);
         command.Parameters.AddWithValue("$required", matchMode == TagMatchMode.And ? normalizedTags.Count : 1);
+        command.Parameters.AddWithValue("$tagSetId", ActiveTagSetId);
         for (var index = 0; index < normalizedTags.Count; index++)
             command.Parameters.AddWithValue(parameters[index], normalizedTags[index]);
 
@@ -529,31 +705,35 @@ public sealed class TagStore
         return path;
     }
 
-    public Task RestoreFromAsync(string backupPath) => Task.Run(() =>
+    public async Task RestoreFromAsync(string backupPath)
     {
-        var fullPath = Path.GetFullPath(backupPath);
-        if (!File.Exists(fullPath)) throw new FileNotFoundException("태그 백업 파일을 찾을 수 없습니다.", fullPath);
-
-        using var source = new SqliteConnection(new SqliteConnectionStringBuilder
+        await Task.Run(() =>
         {
-            DataSource = fullPath,
-            Mode = SqliteOpenMode.ReadOnly
-        }.ToString());
-        source.Open();
-        using (var validation = source.CreateCommand())
-        {
-            validation.CommandText = """
-                SELECT COUNT(*) FROM sqlite_master
-                WHERE type = 'table' AND name IN ('Resources', 'Tags', 'ResourceTags');
-                """;
-            if (Convert.ToInt32(validation.ExecuteScalar()) != 3)
-                throw new InvalidDataException("올바른 태그 백업 데이터베이스가 아닙니다.");
-        }
+            var fullPath = Path.GetFullPath(backupPath);
+            if (!File.Exists(fullPath)) throw new FileNotFoundException("태그 백업 파일을 찾을 수 없습니다.", fullPath);
 
-        using var destination = new SqliteConnection(_connectionString);
-        destination.Open();
-        source.BackupDatabase(destination);
-    });
+            using var source = new SqliteConnection(new SqliteConnectionStringBuilder
+            {
+                DataSource = fullPath,
+                Mode = SqliteOpenMode.ReadOnly
+            }.ToString());
+            source.Open();
+            using (var validation = source.CreateCommand())
+            {
+                validation.CommandText = """
+                    SELECT COUNT(*) FROM sqlite_master
+                    WHERE type = 'table' AND name IN ('Resources', 'Tags', 'ResourceTags');
+                    """;
+                if (Convert.ToInt32(validation.ExecuteScalar()) != 3)
+                    throw new InvalidDataException("올바른 태그 백업 데이터베이스가 아닙니다.");
+            }
+
+            using var destination = new SqliteConnection(_connectionString);
+            destination.Open();
+            source.BackupDatabase(destination);
+        });
+        await InitializeAsync();
+    }
 
     public async Task ResetAsync()
     {
@@ -572,9 +752,10 @@ public sealed class TagStore
         var records = await ReadExportRecordsAsync();
         if (string.Equals(Path.GetExtension(destinationPath), ".csv", StringComparison.OrdinalIgnoreCase))
         {
-            var csv = new StringBuilder("Path,IsDirectory,Tags\r\n");
+            var csv = new StringBuilder("TagSet,Path,IsDirectory,Tags\r\n");
             foreach (var record in records)
-                csv.Append(Csv(record.Path)).Append(',')
+                csv.Append(Csv(record.TagSet)).Append(',')
+                    .Append(Csv(record.Path)).Append(',')
                     .Append(record.IsDirectory ? "true" : "false").Append(',')
                     .Append(Csv(string.Join(", ", record.Tags))).Append("\r\n");
             await File.WriteAllTextAsync(destinationPath, csv.ToString(), new UTF8Encoding(true));
@@ -693,22 +874,25 @@ public sealed class TagStore
         await connection.OpenAsync();
         var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT r.OriginalPath, r.IsDirectory, t.Name
+            SELECT ts.Name, r.OriginalPath, r.IsDirectory, t.Name
             FROM Resources r
-            LEFT JOIN ResourceTags rt ON rt.ResourcePathKey = r.PathKey
-            LEFT JOIN Tags t ON t.Id = rt.TagId
-            ORDER BY r.OriginalPath COLLATE NOCASE, t.Name COLLATE NOCASE;
+            JOIN ResourceTags rt ON rt.ResourcePathKey = r.PathKey
+            JOIN Tags t ON t.Id = rt.TagId
+            JOIN TagSets ts ON ts.Id = t.TagSetId
+            ORDER BY ts.Name COLLATE NOCASE, r.OriginalPath COLLATE NOCASE, t.Name COLLATE NOCASE;
             """;
         await using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
-            var path = reader.GetString(0);
-            if (!records.TryGetValue(path, out var record))
+            var tagSet = reader.GetString(0);
+            var path = reader.GetString(1);
+            var key = $"{tagSet}\0{path}";
+            if (!records.TryGetValue(key, out var record))
             {
-                record = new TagExportRecord(path, reader.GetInt64(1) != 0, []);
-                records[path] = record;
+                record = new TagExportRecord(tagSet, path, reader.GetInt64(2) != 0, []);
+                records[key] = record;
             }
-            if (!reader.IsDBNull(2)) record.Tags.Add(reader.GetString(2));
+            record.Tags.Add(reader.GetString(3));
         }
         return records.Values.ToList();
     }
@@ -724,6 +908,8 @@ public sealed class TagStore
 
     private static string CleanTag(string tag) => tag.Trim().TrimStart('#').Trim();
     private static string NormalizeTag(string tag) => CleanTag(tag).ToUpperInvariant();
+    private static string CleanTagSetName(string name) => name.Trim();
+    private static string NormalizeTagSetName(string name) => CleanTagSetName(name).ToUpperInvariant();
     private static string NormalizePath(string path) =>
         Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar).ToUpperInvariant();
 }
@@ -731,5 +917,9 @@ public sealed class TagStore
 public enum TagMatchMode { And, Or }
 public sealed record TaggedPath(string Path, bool IsDirectory, string TagsText);
 public sealed record TagSummary(string Name, int UsageCount);
-public sealed record TagExportRecord(string Path, bool IsDirectory, List<string> Tags);
+public sealed record TagSetSummary(long Id, string Name, int TagCount)
+{
+    public string DisplayText => $"{Name} ({TagCount:N0})";
+}
+public sealed record TagExportRecord(string TagSet, string Path, bool IsDirectory, List<string> Tags);
 public sealed record TagResourceTarget(string Path, bool IsDirectory);

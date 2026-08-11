@@ -117,17 +117,17 @@
                                    Foreground="#70B7FF" VerticalAlignment="Center" Margin="12,0,7,0"/>
                     </DockPanel>
                     <DockPanel Grid.Row="2" Margin="3,5,3,0" LastChildFill="False">
-                        <TextBlock Text="작가" Foreground="#F0C969" FontWeight="SemiBold"
+                        <TextBlock Text="접두어" Foreground="#F0C969" FontWeight="SemiBold"
                                    VerticalAlignment="Center" Margin="3,0,7,0"/>
-                        <ToggleButton x:Name="AuthorFilterToggle" MinWidth="150" Padding="10,5"
-                                      Content="작가: 전체" Click="AuthorFilterToggle_Click"/>
-                        <TextBlock x:Name="AuthorSelectionText" Text="" Foreground="#70B7FF"
+                        <ToggleButton x:Name="PrefixFilterToggle" MinWidth="150" Padding="10,5"
+                                      Content="접두어: 전체" Click="PrefixFilterToggle_Click"/>
+                        <TextBlock x:Name="PrefixSelectionText" Text="" Foreground="#70B7FF"
                                    VerticalAlignment="Center" Margin="8,0"/>
-                        <CheckBox x:Name="HideAuthorPrefixCheckBox" Content="목록에서 작가 접두어 숨기기"
+                        <CheckBox x:Name="HidePrefixCheckBox" Content="목록에서 접두어 숨기기"
                                   Foreground="#D9DEE7" VerticalAlignment="Center" Margin="12,0,0,0"
-                                  Checked="HideAuthorPrefix_Changed" Unchecked="HideAuthorPrefix_Changed"/>
-                        <Popup x:Name="AuthorFilterPopup" PlacementTarget="{Binding ElementName=AuthorFilterToggle}"
-                               Placement="Bottom" StaysOpen="False" Closed="AuthorFilterPopup_Closed">
+                                  Checked="HidePrefix_Changed" Unchecked="HidePrefix_Changed"/>
+                        <Popup x:Name="PrefixFilterPopup" PlacementTarget="{Binding ElementName=PrefixFilterToggle}"
+                               Placement="Bottom" StaysOpen="False" Closed="PrefixFilterPopup_Closed">
                             <Border Width="360" MaxHeight="430" Padding="10" Background="#20242B"
                                     BorderBrush="#4A5260" BorderThickness="1" CornerRadius="4">
                                 <Grid>
@@ -138,13 +138,13 @@
                                     </Grid.RowDefinitions>
                                     <DockPanel>
                                         <Button DockPanel.Dock="Right" Content="전체 해제" Padding="8,4"
-                                                Click="ClearAuthorFilter_Click"/>
-                                        <TextBox x:Name="AuthorSearchBox" Margin="0,3,7,3"
-                                                 ToolTip="작가명 검색" TextChanged="AuthorSearchBox_TextChanged"/>
+                                                Click="ClearPrefixFilter_Click"/>
+                                        <TextBox x:Name="PrefixSearchBox" Margin="0,3,7,3"
+                                                 ToolTip="접두어 검색" TextChanged="PrefixSearchBox_TextChanged"/>
                                     </DockPanel>
-                                    <TextBlock Grid.Row="1" Text="여러 작가를 선택하면 OR 조건으로 표시합니다."
+                                    <TextBlock Grid.Row="1" Text="여러 접두어를 선택하면 OR 조건으로 표시합니다."
                                                Foreground="#9CA5B3" FontSize="11" Margin="2,4,2,7"/>
-                                    <ListBox x:Name="AuthorOptionList" Grid.Row="2" BorderThickness="0"
+                                    <ListBox x:Name="PrefixOptionList" Grid.Row="2" BorderThickness="0"
                                              Background="#171A20" Foreground="#F4F4F5"
                                              ScrollViewer.HorizontalScrollBarVisibility="Disabled"
                                              ScrollViewer.VerticalScrollBarVisibility="Auto"
@@ -154,7 +154,7 @@
                                             <DataTemplate>
                                                 <CheckBox Content="{Binding DisplayText}" IsChecked="{Binding IsSelected, Mode=TwoWay}"
                                                           Foreground="#F4F4F5" Padding="5,3"
-                                                          Click="AuthorOption_Click"/>
+                                                          Click="PrefixOption_Click"/>
                                             </DataTemplate>
                                         </ListBox.ItemTemplate>
                                     </ListBox>
@@ -164,19 +164,38 @@
                     </DockPanel>
                     <Border Grid.Row="3" Margin="3,7,3,0" Padding="7,5" Background="#11141A"
                             BorderBrush="#303744" BorderThickness="1" CornerRadius="4">
-                        <DockPanel>
-                            <StackPanel DockPanel.Dock="Left" Width="158" Margin="0,2,8,0">
-                                <TextBlock Text="전체 태그 (A-Z)" Foreground="#F0C969" FontWeight="SemiBold"/>
-                                <Button Content="+ 태그 추가" Padding="7,3" Margin="0,5,0,0"
-                                        Click="AddTagToLibrary_Click"/>
-                                <Button Content="선택 지우기" Padding="7,3" Margin="0,5,0,0"
-                                        Click="ClearSelectedTags_Click"/>
-                            </StackPanel>
-                            <ScrollViewer MaxHeight="120" VerticalScrollBarVisibility="Auto"
-                                          HorizontalScrollBarVisibility="Disabled">
-                                <WrapPanel x:Name="TagCloudPanel"/>
-                            </ScrollViewer>
-                        </DockPanel>
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+                            <DockPanel Margin="0,0,0,5">
+                                <TextBlock DockPanel.Dock="Left" Text="태그 세트" Foreground="#F0C969"
+                                           FontWeight="SemiBold" VerticalAlignment="Center" Margin="3,0,7,0"/>
+                                <Button DockPanel.Dock="Right" Content="삭제" Padding="8,3"
+                                        ToolTip="현재 태그 세트 삭제" Click="DeleteTagSet_Click"/>
+                                <Button DockPanel.Dock="Right" Content="이름 변경" Padding="8,3"
+                                        Click="RenameTagSet_Click"/>
+                                <Button DockPanel.Dock="Right" Content="+ 새 세트" Padding="8,3"
+                                        Click="AddTagSet_Click"/>
+                                <ComboBox x:Name="TagSetBox" Width="230" HorizontalAlignment="Left"
+                                          DisplayMemberPath="Name" SelectedValuePath="Id"
+                                          SelectionChanged="TagSetBox_SelectionChanged"/>
+                            </DockPanel>
+                            <DockPanel Grid.Row="1">
+                                <StackPanel DockPanel.Dock="Left" Width="158" Margin="0,2,8,0">
+                                    <TextBlock Text="현재 세트 태그 (A-Z)" Foreground="#F0C969" FontWeight="SemiBold"/>
+                                    <Button Content="+ 태그 추가" Padding="7,3" Margin="0,5,0,0"
+                                            Click="AddTagToLibrary_Click"/>
+                                    <Button Content="선택 지우기" Padding="7,3" Margin="0,5,0,0"
+                                            Click="ClearSelectedTags_Click"/>
+                                </StackPanel>
+                                <ScrollViewer MaxHeight="120" VerticalScrollBarVisibility="Auto"
+                                              HorizontalScrollBarVisibility="Disabled">
+                                    <WrapPanel x:Name="TagCloudPanel"/>
+                                </ScrollViewer>
+                            </DockPanel>
+                        </Grid>
                     </Border>
                 </Grid>
             </Border>

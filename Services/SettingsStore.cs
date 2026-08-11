@@ -1,5 +1,7 @@
 using System.IO;
 using System.Text.Json;
+using System.Text.Json.Serialization;
+using CustomImageViewer.Models;
 
 namespace CustomImageViewer.Services;
 
@@ -22,7 +24,9 @@ public sealed class SettingsStore
         {
             if (!File.Exists(_settingsPath)) return new AppSettings();
             var json = await File.ReadAllTextAsync(_settingsPath);
-            return JsonSerializer.Deserialize<AppSettings>(json) ?? new AppSettings();
+            var settings = JsonSerializer.Deserialize<AppSettings>(json) ?? new AppSettings();
+            settings.PrefixPatterns ??= PrefixPattern.CreateDefaults();
+            return settings;
         }
         catch
         {
@@ -60,9 +64,12 @@ public sealed class AppSettings
     public int ExplorerPageSize { get; set; } = 300;
     public int MouseWheelSpeedMultiplier { get; set; } = 3;
     public double ExplorerThumbnailSize { get; set; } = 190;
-    public bool HideAuthorPrefix { get; set; }
+    [JsonPropertyName("HideAuthorPrefix")]
+    public bool HidePrefix { get; set; }
+    public List<PrefixPattern> PrefixPatterns { get; set; } = PrefixPattern.CreateDefaults();
     public int ThumbnailCacheMaxMegabytes { get; set; } = 2048;
     public bool TagAutoBackupEnabled { get; set; } = true;
     public int TagBackupRetentionCount { get; set; } = 10;
+    public long ActiveTagSetId { get; set; } = TagStore.DefaultTagSetId;
     public long LastTagBackupUtcTicks { get; set; }
 }

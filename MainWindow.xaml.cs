@@ -21,10 +21,10 @@ public partial class MainWindow : Window
 {
     private readonly BulkObservableCollection<ImageFileItem> _images = [];
     private readonly BulkObservableCollection<ImageFileItem> _visibleImages = [];
-    private readonly BulkObservableCollection<AuthorFilterOption> _visibleAuthorOptions = [];
-    private readonly List<AuthorFilterOption> _allAuthorOptions = [];
-    private readonly HashSet<string> _selectedAuthorKeys = new(StringComparer.CurrentCultureIgnoreCase);
-    private List<ImageFileItem> _authorFilterSource = [];
+    private readonly BulkObservableCollection<PrefixFilterOption> _visiblePrefixOptions = [];
+    private readonly List<PrefixFilterOption> _allPrefixOptions = [];
+    private readonly HashSet<string> _selectedPrefixKeys = new(StringComparer.CurrentCultureIgnoreCase);
+    private List<ImageFileItem> _prefixFilterSource = [];
     private readonly MagickImageDecoder _magickDecoder = new();
     private readonly IImageDecoder _decoder;
     private readonly TagStore _tagStore = new();
@@ -38,6 +38,7 @@ public partial class MainWindow : Window
     private readonly Dictionary<string, ImageTextCacheEntry> _imageTextCache =
         new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _selectedTagNames = new(StringComparer.CurrentCultureIgnoreCase);
+    private readonly BulkObservableCollection<TagSetSummary> _tagSets = [];
     private readonly List<string> _folderHistory = [];
     private readonly Dictionary<string, ExplorerLocationState> _folderLocations =
         new(StringComparer.OrdinalIgnoreCase);
@@ -75,6 +76,7 @@ public partial class MainWindow : Window
     private bool _isMouseFolderNavigating;
     private bool _isAutoRefreshingFolder;
     private bool _pendingFolderRefresh;
+    private bool _isRefreshingTagSets;
     private string _typeSearchBuffer = string.Empty;
     private int _folderHistoryIndex = -1;
     private int _currentExplorerPage;
@@ -82,7 +84,7 @@ public partial class MainWindow : Window
     private string? _tagFilterReturnFolder;
     private int ExplorerPageSize => Math.Clamp(_settings.ExplorerPageSize, 100, 1000);
     private int MouseWheelSpeedMultiplier => Math.Clamp(_settings.MouseWheelSpeedMultiplier, 1, 5);
-    private const string UnassignedAuthorKey = "\0";
+    private const string UnassignedPrefixKey = "\0";
 
     private enum ExplorerSortField
     {
@@ -106,7 +108,8 @@ public partial class MainWindow : Window
             _magickDecoder);
         InitializeComponent();
         ThumbnailList.ItemsSource = _visibleImages;
-        AuthorOptionList.ItemsSource = _visibleAuthorOptions;
+        PrefixOptionList.ItemsSource = _visiblePrefixOptions;
+        TagSetBox.ItemsSource = _tagSets;
         ViewModeBox.SelectedIndex = 0;
         _animationTimer.Tick += AnimationTimer_Tick;
         _typeSearchResetTimer.Interval = TimeSpan.FromMilliseconds(1100);
@@ -119,7 +122,9 @@ public partial class MainWindow : Window
         Loaded += async (_, _) =>
         {
             await _tagStore.InitializeAsync();
-            // The initial folder can contain many images. Show the global tag list
+            _settings = await _settingsStore.LoadAsync();
+            await RefreshTagSetsAsync(_settings.ActiveTagSetId);
+            // The initial folder can contain many images. Show the active tag set
             // before OCR-cache maintenance and thumbnail decoding begin.
             await RefreshTagCloudAsync();
             await _ocrCacheStore.InitializeAsync();
@@ -129,7 +134,6 @@ public partial class MainWindow : Window
                     entry.FileLength, entry.LastWriteUtcTicks, entry.OcrResult,
                     entry.TranslatedText, entry.OverlayLines,
                     entry.TargetLanguageCode, entry.OverlayEnabled);
-            _settings = await _settingsStore.LoadAsync();
             if (_settings.TagAutoBackupEnabled
                 && (_settings.LastTagBackupUtcTicks <= 0
                     || new DateTime(_settings.LastTagBackupUtcTicks, DateTimeKind.Utc) < DateTime.UtcNow.AddDays(-1)))
@@ -188,7 +192,7 @@ public partial class MainWindow : Window
         FoldersFirstCheckBox.IsChecked = _settings.ExplorerFoldersFirst;
         ThumbnailSizeSlider.Value = Math.Clamp(_settings.ExplorerThumbnailSize, 120, 320);
         ApplyThumbnailSize(ThumbnailSizeSlider.Value);
-        HideAuthorPrefixCheckBox.IsChecked = _settings.HideAuthorPrefix;
+        HidePrefixCheckBox.IsChecked = _settings.HidePrefix;
 
         var targetExists = TargetLanguageBox.Items.OfType<ComboBoxItem>()
             .Any(item => string.Equals(item.Tag?.ToString(), _settings.TargetLanguageCode, StringComparison.OrdinalIgnoreCase));
@@ -239,7 +243,7 @@ public partial class MainWindow : Window
         _settings.ExplorerSortDescending = SortDirectionBox.SelectedIndex == 1;
         _settings.ExplorerFoldersFirst = FoldersFirstCheckBox.IsChecked == true;
         _settings.ExplorerThumbnailSize = ThumbnailSizeSlider.Value;
-        _settings.HideAuthorPrefix = HideAuthorPrefixCheckBox.IsChecked == true;
+        _settings.HidePrefix = HidePrefixCheckBox.IsChecked == true;
 
         try { _settingsStore.Save(_settings); }
         catch { }
@@ -328,7 +332,7 @@ public partial class MainWindow : Window
                 item.TagsText = string.Join(", ", tags);
         if (restoreLocation is null)
             _folderLocations.TryGetValue(NormalizeFolderLocationKey(normalizedFolder), out restoreLocation);
-        SetExplorerItems(items, restoreLocation, resetAuthorFilter: folderIsChanging);
+        SetExplorerItems(items, restoreLocation, resetPrefixFilter: folderIsChanging);
         ConfigureFolderWatcher();
 
         var folderCount = items.Count(item => item.IsDirectory);
@@ -578,13 +582,13 @@ public partial class MainWindow : Window
     private void SetExplorerItems(
         IEnumerable<ImageFileItem> items,
         ExplorerLocationState? restoreLocation = null,
-        bool resetAuthorFilter = false)
+        bool resetPrefixFilter = false)
     {
-        if (resetAuthorFilter) _selectedAuthorKeys.Clear();
-        _authorFilterSource = items.ToList();
-        RebuildAuthorOptions();
-        ApplyAuthorPrefixDisplay(_authorFilterSource);
-        _images.ReplaceAll(FilterItemsBySelectedAuthors(_authorFilterSource));
+        if (resetPrefixFilter) _selectedPrefixKeys.Clear();
+        _prefixFilterSource = items.ToList();
+        RebuildPrefixOptions();
+        ApplyPrefixDisplay(_prefixFilterSource);
+        _images.ReplaceAll(FilterItemsBySelectedPrefixes(_prefixFilterSource));
         _currentExplorerPage = restoreLocation?.Page ?? 0;
         ShowExplorerPage(verticalOffset: restoreLocation?.VerticalOffset);
 
@@ -598,75 +602,88 @@ public partial class MainWindow : Window
         }, DispatcherPriority.Loaded);
     }
 
-    private void RebuildAuthorOptions()
+    private void RebuildPrefixOptions()
     {
-        var groups = _authorFilterSource
+        var groups = _prefixFilterSource
             .Where(item => item.IsDirectory)
-            .GroupBy(GetAuthorKey, StringComparer.CurrentCultureIgnoreCase)
+            .GroupBy(GetPrefixKey, StringComparer.CurrentCultureIgnoreCase)
             .Select(group => new
             {
                 Key = group.Key,
-                Name = group.Key == UnassignedAuthorKey ? "작가 미지정" : group.Key,
+                Name = group.Key == UnassignedPrefixKey ? "접두어 없음" : group.Key,
                 Count = group.Count()
             })
-            .OrderBy(group => group.Key == UnassignedAuthorKey ? 1 : 0)
+            .OrderBy(group => group.Key == UnassignedPrefixKey ? 1 : 0)
             .ThenBy(group => group.Name, StringComparer.CurrentCultureIgnoreCase)
             .ToList();
 
         var validKeys = groups.Select(group => group.Key)
             .ToHashSet(StringComparer.CurrentCultureIgnoreCase);
-        _selectedAuthorKeys.RemoveWhere(key => !validKeys.Contains(key));
-        _allAuthorOptions.Clear();
+        _selectedPrefixKeys.RemoveWhere(key => !validKeys.Contains(key));
+        _allPrefixOptions.Clear();
         foreach (var group in groups)
         {
-            _allAuthorOptions.Add(new AuthorFilterOption(group.Key, group.Name, group.Count)
+            _allPrefixOptions.Add(new PrefixFilterOption(group.Key, group.Name, group.Count)
             {
-                IsSelected = _selectedAuthorKeys.Contains(group.Key)
+                IsSelected = _selectedPrefixKeys.Contains(group.Key)
             });
         }
-        ApplyAuthorOptionSearch();
-        UpdateAuthorFilterSummary();
+        ApplyPrefixOptionSearch();
+        UpdatePrefixFilterSummary();
     }
 
-    private static string GetAuthorKey(ImageFileItem item) =>
-        TryExtractLeadingAuthor(item.FileName, out var author, out _) ? author : UnassignedAuthorKey;
+    private string GetPrefixKey(ImageFileItem item) =>
+        TryExtractLeadingPrefix(item.FileName, out var prefix, out _) ? prefix : UnassignedPrefixKey;
 
-    private static bool TryExtractLeadingAuthor(string name, out string author, out int prefixLength)
+    private bool TryExtractLeadingPrefix(string name, out string prefix, out int prefixLength)
     {
-        author = string.Empty;
+        prefix = string.Empty;
         prefixLength = 0;
         if (string.IsNullOrWhiteSpace(name)) return false;
 
         var leadingWhitespace = name.Length - name.TrimStart().Length;
-        var trimmed = name.AsSpan(leadingWhitespace);
+        var trimmed = name[leadingWhitespace..];
         if (trimmed.Length < 3) return false;
-        var closing = trimmed[0] switch
-        {
-            '[' => ']',
-            '【' => '】',
-            _ => '\0'
-        };
-        if (closing == '\0') return false;
 
-        var closingIndex = trimmed.IndexOf(closing);
-        if (closingIndex <= 1) return false;
-        author = trimmed[1..closingIndex].ToString().Trim();
-        if (author.Length == 0) return false;
-        prefixLength = leadingWhitespace + closingIndex + 1;
-        return true;
+        var patterns = _settings.PrefixPatterns ?? [];
+        foreach (var pattern in patterns
+                     .Where(pattern => !string.IsNullOrEmpty(pattern.Opening)
+                                       && !string.IsNullOrEmpty(pattern.Closing))
+                     .OrderByDescending(pattern => pattern.Opening.Length))
+        {
+            if (!trimmed.StartsWith(pattern.Opening, StringComparison.Ordinal)) continue;
+
+            var closingIndex = trimmed.IndexOf(
+                pattern.Closing,
+                pattern.Opening.Length,
+                StringComparison.Ordinal);
+            if (closingIndex <= pattern.Opening.Length) continue;
+
+            var inner = trimmed.Substring(
+                pattern.Opening.Length,
+                closingIndex - pattern.Opening.Length);
+            if (string.IsNullOrWhiteSpace(inner)) continue;
+
+            var wrappedLength = closingIndex + pattern.Closing.Length;
+            prefix = trimmed[..wrappedLength];
+            prefixLength = leadingWhitespace + wrappedLength;
+            return true;
+        }
+
+        return false;
     }
 
-    private IEnumerable<ImageFileItem> FilterItemsBySelectedAuthors(IEnumerable<ImageFileItem> source) =>
-        _selectedAuthorKeys.Count == 0
+    private IEnumerable<ImageFileItem> FilterItemsBySelectedPrefixes(IEnumerable<ImageFileItem> source) =>
+        _selectedPrefixKeys.Count == 0
             ? source
-            : source.Where(item => item.IsDirectory && _selectedAuthorKeys.Contains(GetAuthorKey(item)));
+            : source.Where(item => item.IsDirectory && _selectedPrefixKeys.Contains(GetPrefixKey(item)));
 
-    private void ApplyAuthorFilter()
+    private void ApplyPrefixFilter()
     {
         var selectedPaths = ThumbnailList.SelectedItems.OfType<ImageFileItem>()
             .Select(item => item.FullPath)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var filtered = FilterItemsBySelectedAuthors(_authorFilterSource).ToList();
+        var filtered = FilterItemsBySelectedPrefixes(_prefixFilterSource).ToList();
         _images.ReplaceAll(filtered);
 
         var firstSelectedIndex = filtered.FindIndex(item => selectedPaths.Contains(item.FullPath));
@@ -683,19 +700,19 @@ public partial class MainWindow : Window
                     ThumbnailList.ScrollIntoView(selected);
             }, DispatcherPriority.Loaded);
         }
-        UpdateAuthorFilterSummary();
-        StatusText.Text = _selectedAuthorKeys.Count == 0
-            ? $"작가 필터 해제 · 전체 {_images.Count:N0}개"
-            : $"작가 필터 결과 {_images.Count:N0}개";
+        UpdatePrefixFilterSummary();
+        StatusText.Text = _selectedPrefixKeys.Count == 0
+            ? $"접두어 필터 해제 · 전체 {_images.Count:N0}개"
+            : $"접두어 필터 결과 {_images.Count:N0}개";
     }
 
-    private void ApplyAuthorPrefixDisplay(IEnumerable<ImageFileItem> items)
+    private void ApplyPrefixDisplay(IEnumerable<ImageFileItem> items)
     {
-        var hidePrefix = HideAuthorPrefixCheckBox.IsChecked == true;
+        var hidePrefix = HidePrefixCheckBox.IsChecked == true;
         foreach (var item in items)
         {
             if (hidePrefix && item.IsDirectory
-                && TryExtractLeadingAuthor(item.FileName, out _, out var prefixLength))
+                && TryExtractLeadingPrefix(item.FileName, out _, out var prefixLength))
             {
                 var withoutPrefix = item.FileName[prefixLength..].TrimStart();
                 item.DisplayName = withoutPrefix.Length == 0 ? item.FileName : withoutPrefix;
@@ -707,67 +724,67 @@ public partial class MainWindow : Window
         }
     }
 
-    private void ApplyAuthorOptionSearch()
+    private void ApplyPrefixOptionSearch()
     {
-        if (AuthorSearchBox is null) return;
-        var query = AuthorSearchBox.Text.Trim();
-        _visibleAuthorOptions.ReplaceAll(string.IsNullOrEmpty(query)
-            ? _allAuthorOptions
-            : _allAuthorOptions.Where(option =>
+        if (PrefixSearchBox is null) return;
+        var query = PrefixSearchBox.Text.Trim();
+        _visiblePrefixOptions.ReplaceAll(string.IsNullOrEmpty(query)
+            ? _allPrefixOptions
+            : _allPrefixOptions.Where(option =>
                 option.Name.Contains(query, StringComparison.CurrentCultureIgnoreCase)));
     }
 
-    private void UpdateAuthorFilterSummary()
+    private void UpdatePrefixFilterSummary()
     {
-        if (AuthorFilterToggle is null) return;
-        AuthorFilterToggle.Content = _selectedAuthorKeys.Count switch
+        if (PrefixFilterToggle is null) return;
+        PrefixFilterToggle.Content = _selectedPrefixKeys.Count switch
         {
-            0 => "작가: 전체",
-            1 => $"작가: {_allAuthorOptions.FirstOrDefault(option => option.IsSelected)?.Name ?? "1명"}",
-            _ => $"작가: {_selectedAuthorKeys.Count:N0}명"
+            0 => "접두어: 전체",
+            1 => $"접두어: {_allPrefixOptions.FirstOrDefault(option => option.IsSelected)?.Name ?? "1개"}",
+            _ => $"접두어: {_selectedPrefixKeys.Count:N0}개"
         };
-        AuthorSelectionText.Text = _selectedAuthorKeys.Count == 0
-            ? $"{_allAuthorOptions.Count:N0}명"
-            : $"선택 {_selectedAuthorKeys.Count:N0}명";
+        PrefixSelectionText.Text = _selectedPrefixKeys.Count == 0
+            ? $"{_allPrefixOptions.Count:N0}개"
+            : $"선택 {_selectedPrefixKeys.Count:N0}개";
     }
 
-    private void AuthorFilterToggle_Click(object sender, RoutedEventArgs e)
+    private void PrefixFilterToggle_Click(object sender, RoutedEventArgs e)
     {
-        AuthorFilterPopup.IsOpen = AuthorFilterToggle.IsChecked == true;
-        if (!AuthorFilterPopup.IsOpen) return;
+        PrefixFilterPopup.IsOpen = PrefixFilterToggle.IsChecked == true;
+        if (!PrefixFilterPopup.IsOpen) return;
         Dispatcher.BeginInvoke(() =>
         {
-            AuthorSearchBox.Focus();
-            AuthorSearchBox.SelectAll();
+            PrefixSearchBox.Focus();
+            PrefixSearchBox.SelectAll();
         }, DispatcherPriority.Input);
     }
 
-    private void AuthorFilterPopup_Closed(object sender, EventArgs e) =>
-        AuthorFilterToggle.IsChecked = false;
+    private void PrefixFilterPopup_Closed(object sender, EventArgs e) =>
+        PrefixFilterToggle.IsChecked = false;
 
-    private void AuthorSearchBox_TextChanged(object sender, TextChangedEventArgs e) =>
-        ApplyAuthorOptionSearch();
+    private void PrefixSearchBox_TextChanged(object sender, TextChangedEventArgs e) =>
+        ApplyPrefixOptionSearch();
 
-    private void AuthorOption_Click(object sender, RoutedEventArgs e)
+    private void PrefixOption_Click(object sender, RoutedEventArgs e)
     {
-        if (sender is not CheckBox { DataContext: AuthorFilterOption option }) return;
-        if (option.IsSelected) _selectedAuthorKeys.Add(option.Key);
-        else _selectedAuthorKeys.Remove(option.Key);
-        ApplyAuthorFilter();
+        if (sender is not CheckBox { DataContext: PrefixFilterOption option }) return;
+        if (option.IsSelected) _selectedPrefixKeys.Add(option.Key);
+        else _selectedPrefixKeys.Remove(option.Key);
+        ApplyPrefixFilter();
     }
 
-    private void ClearAuthorFilter_Click(object sender, RoutedEventArgs e)
+    private void ClearPrefixFilter_Click(object sender, RoutedEventArgs e)
     {
-        _selectedAuthorKeys.Clear();
-        foreach (var option in _allAuthorOptions) option.IsSelected = false;
-        ApplyAuthorFilter();
+        _selectedPrefixKeys.Clear();
+        foreach (var option in _allPrefixOptions) option.IsSelected = false;
+        ApplyPrefixFilter();
     }
 
-    private void HideAuthorPrefix_Changed(object sender, RoutedEventArgs e)
+    private void HidePrefix_Changed(object sender, RoutedEventArgs e)
     {
         if (!IsInitialized) return;
-        _settings.HideAuthorPrefix = HideAuthorPrefixCheckBox.IsChecked == true;
-        ApplyAuthorPrefixDisplay(_authorFilterSource);
+        _settings.HidePrefix = HidePrefixCheckBox.IsChecked == true;
+        ApplyPrefixDisplay(_prefixFilterSource);
     }
 
     private void ShowExplorerPage(bool scrollToBottom = false, double? verticalOffset = null)
@@ -1773,6 +1790,127 @@ public partial class MainWindow : Window
         StatusText.Text = $"태그 {mode.ToString().ToUpperInvariant()} 검색 결과 {items.Count:N0}개";
     }
 
+    private async Task RefreshTagSetsAsync(long? preferredTagSetId = null)
+    {
+        var sets = await _tagStore.GetTagSetsAsync();
+        _isRefreshingTagSets = true;
+        try
+        {
+            _tagSets.ReplaceAll(sets);
+            var selected = sets.FirstOrDefault(set => set.Id == preferredTagSetId)
+                           ?? sets.FirstOrDefault();
+            if (selected is null) return;
+
+            _tagStore.ActiveTagSetId = selected.Id;
+            _settings.ActiveTagSetId = selected.Id;
+            TagSetBox.SelectedValue = selected.Id;
+        }
+        finally
+        {
+            _isRefreshingTagSets = false;
+        }
+    }
+
+    private async void TagSetBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_isRefreshingTagSets || TagSetBox.SelectedItem is not TagSetSummary selected) return;
+        if (_tagStore.ActiveTagSetId == selected.Id) return;
+
+        _tagFilterDebounceCancellation?.Cancel();
+        _tagFilterGeneration++;
+        _selectedTagNames.Clear();
+        _tagStore.ActiveTagSetId = selected.Id;
+        _settings.ActiveTagSetId = selected.Id;
+        await _settingsStore.SaveAsync(_settings);
+
+        if (ClearTagSearchButton.Visibility == Visibility.Visible)
+            await RestoreBeforeTagFilterAsync();
+        else
+            await RefreshItemTagsAsync(_prefixFilterSource);
+        await RefreshTagCloudAsync();
+        StatusText.Text = $"태그 세트를 '{selected.Name}'(으)로 전환했습니다.";
+    }
+
+    private async void AddTagSet_Click(object sender, RoutedEventArgs e)
+    {
+        var dialog = new TextInputWindow("새 태그 세트", "새 태그 세트 이름을 입력하세요.") { Owner = this };
+        if (dialog.ShowDialog() != true) return;
+
+        try
+        {
+            var id = await _tagStore.CreateTagSetAsync(dialog.Value);
+            var restoreFilteredView = ClearTagSearchButton.Visibility == Visibility.Visible;
+            _selectedTagNames.Clear();
+            await RefreshTagSetsAsync(id);
+            if (restoreFilteredView)
+                await RestoreBeforeTagFilterAsync();
+            else
+                await RefreshItemTagsAsync(_prefixFilterSource);
+            await RefreshTagCloudAsync();
+            _settings.ActiveTagSetId = id;
+            await _settingsStore.SaveAsync(_settings);
+            StatusText.Text = $"태그 세트 '{dialog.Value}'을(를) 만들었습니다.";
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"태그 세트를 만들 수 없습니다.\n\n{ex.Message}", "태그 세트",
+                MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+    }
+
+    private async void RenameTagSet_Click(object sender, RoutedEventArgs e)
+    {
+        if (TagSetBox.SelectedItem is not TagSetSummary selected) return;
+        var dialog = new TextInputWindow("태그 세트 이름 변경", "새 이름을 입력하세요.", selected.Name)
+        {
+            Owner = this
+        };
+        if (dialog.ShowDialog() != true) return;
+
+        try
+        {
+            await _tagStore.RenameTagSetAsync(selected.Id, dialog.Value);
+            await RefreshTagSetsAsync(selected.Id);
+            StatusText.Text = $"태그 세트 이름을 '{dialog.Value}'(으)로 변경했습니다.";
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"태그 세트 이름을 변경할 수 없습니다.\n\n{ex.Message}", "태그 세트",
+                MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+    }
+
+    private async void DeleteTagSet_Click(object sender, RoutedEventArgs e)
+    {
+        if (TagSetBox.SelectedItem is not TagSetSummary selected) return;
+        var answer = MessageBox.Show(this,
+            $"태그 세트 '{selected.Name}'을(를) 삭제할까요?\n\n세트 안의 태그와 모든 적용 정보도 함께 삭제됩니다. 삭제 전 안전 백업을 만듭니다.",
+            "태그 세트 삭제", MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No);
+        if (answer != MessageBoxResult.Yes) return;
+
+        try
+        {
+            await _tagStore.CreateSafetyBackupAsync("before-tagset-delete");
+            await _tagStore.DeleteTagSetAsync(selected.Id);
+            _tagFilterDebounceCancellation?.Cancel();
+            _tagFilterGeneration++;
+            _selectedTagNames.Clear();
+            ClearTagSearchButton.Visibility = Visibility.Collapsed;
+            _tagFilterReturnState = null;
+            _tagFilterReturnFolder = null;
+            await RefreshTagSetsAsync();
+            await RefreshTagCloudAsync();
+            await LoadFolderAsync(_currentFolder, recordHistory: false);
+            await _settingsStore.SaveAsync(_settings);
+            StatusText.Text = $"태그 세트 '{selected.Name}'을(를) 삭제했습니다.";
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, ex.Message, "태그 세트 삭제",
+                MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+    }
+
     private async Task RefreshTagCloudAsync()
     {
         var tags = await _tagStore.GetAllTagsAsync();
@@ -1962,11 +2100,11 @@ public partial class MainWindow : Window
 
     private void ExplorerSort_Changed(object sender, RoutedEventArgs e)
     {
-        if (!IsLoaded || _authorFilterSource.Count < 2) return;
+        if (!IsLoaded || _prefixFilterSource.Count < 2) return;
 
         var selectedPath = (ThumbnailList.SelectedItem as ImageFileItem)?.FullPath;
-        _authorFilterSource = SortExplorerItems(_authorFilterSource);
-        _images.ReplaceAll(FilterItemsBySelectedAuthors(_authorFilterSource));
+        _prefixFilterSource = SortExplorerItems(_prefixFilterSource);
+        _images.ReplaceAll(FilterItemsBySelectedPrefixes(_prefixFilterSource));
 
         if (selectedPath is not null)
         {
@@ -2237,6 +2375,7 @@ public partial class MainWindow : Window
         var settingsAccepted = dialog.ShowDialog() == true;
         if (dialog.TagDataChanged)
         {
+            await RefreshTagSetsAsync(_settings.ActiveTagSetId);
             await RefreshTagCloudAsync();
             await LoadFolderAsync(_currentFolder);
         }
@@ -2256,12 +2395,16 @@ public partial class MainWindow : Window
         _settings.ThumbnailCacheMaxMegabytes = dialog.ThumbnailCacheMaxMegabytes;
         _settings.TagAutoBackupEnabled = dialog.TagAutoBackupEnabled;
         _settings.TagBackupRetentionCount = dialog.TagBackupRetentionCount;
+        _settings.PrefixPatterns = dialog.PrefixPatterns.Select(pattern => pattern.Clone()).ToList();
 
         SortFieldBox.SelectedIndex = _settings.ExplorerSortField;
         SortDirectionBox.SelectedIndex = _settings.ExplorerSortDescending ? 1 : 0;
         FoldersFirstCheckBox.IsChecked = _settings.ExplorerFoldersFirst;
         ExitOnEscapeCheckBox.IsChecked = _settings.ExitOnEscape;
         TargetLanguageBox.SelectedValue = _settings.TargetLanguageCode;
+        RebuildPrefixOptions();
+        ApplyPrefixDisplay(_prefixFilterSource);
+        _images.ReplaceAll(FilterItemsBySelectedPrefixes(_prefixFilterSource));
 
         if (anchorPath is not null)
         {
