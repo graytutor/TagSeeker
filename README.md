@@ -14,6 +14,7 @@ It combines thumbnail-based folder browsing, flexible tags, prefix filtering, mu
 - 여러 이미지 맞춤 보기 모드와 키보드·마우스 탐색
 - 이미지 문자 자동 인식, 언어 감지, 번역 및 번역 오버레이
 - 마지막 폴더, 화면 위치와 사용자 설정 복원
+- GitHub 릴리스 기반 자동 업데이트 확인과 안전한 앱 내 업데이트
 
 ## 다운로드 및 실행
 
@@ -22,6 +23,10 @@ It combines thumbnail-based folder browsing, flexible tags, prefix filtering, mu
 3. `TagSeeker.exe`를 실행합니다.
 
 별도의 설치 과정이나 .NET 설치는 필요하지 않습니다. 현재 배포판은 Windows x64용입니다.
+
+## 업데이트
+
+설정의 `업데이트` 탭에서 새 버전을 직접 확인하거나, 프로그램 시작 시 하루 한 번 자동으로 확인하도록 설정할 수 있습니다. 새 버전이 발견되어도 사용자 동의 없이 다운로드하거나 적용하지 않습니다. 업데이트 중에는 앱 구성 파일만 교체되며 `TranslationModel`, 태그, 설정, 캐시 데이터는 유지됩니다. 적용에 실패하면 백업한 기존 파일을 복구하고 오류 기록을 남깁니다.
 
 ## 기본 조작
 

@@ -283,6 +283,28 @@
                 </ScrollViewer>
             </TabItem>
 
+            <TabItem Header="업데이트">
+                <StackPanel Margin="22">
+                    <TextBlock Text="TagSeeker 업데이트" FontSize="18" FontWeight="SemiBold"
+                               Foreground="#70B7FF" Margin="0,0,0,12"/>
+                    <TextBlock x:Name="CurrentVersionText" Margin="5,4"/>
+                    <CheckBox x:Name="AutomaticUpdateCheckBox"
+                              Content="프로그램 시작 시 하루 한 번 새 버전 확인"
+                              Margin="7,12,7,6"/>
+                    <TextBlock Text="새 버전이 있어도 동의 없이 다운로드하거나 설치하지 않습니다. 업데이트할 때 번역 모델, 태그, 설정과 캐시는 유지됩니다."
+                               Foreground="#B9C0CA" TextWrapping="Wrap" Margin="5,4,5,12"/>
+                    <WrapPanel>
+                        <Button x:Name="CheckForUpdateButton" Content="지금 업데이트 확인"
+                                Click="CheckForUpdate_Click"/>
+                    </WrapPanel>
+                    <ProgressBar x:Name="UpdateDownloadProgress" Height="8" Margin="5,12,5,5"
+                                 Minimum="0" Maximum="100" Visibility="Collapsed"/>
+                    <TextBlock x:Name="UpdateStatusText" Foreground="#9DA7B5"
+                               Text="GitHub의 공식 TagSeeker 릴리스를 확인합니다."
+                               TextWrapping="Wrap" Margin="5,7,0,0"/>
+                </StackPanel>
+            </TabItem>
+
             <TabItem Header="오류 기록 및 진단">
                 <StackPanel Margin="22">
                     <TextBlock Text="오류 기록과 문제 해결" FontSize="18" FontWeight="SemiBold"

@@ -15,6 +15,7 @@ public partial class SettingsWindow : Window
     private readonly ThumbnailCacheStore _thumbnailCacheStore;
     private readonly TagStore _tagStore;
     private readonly BuiltInQwenTranslatorService _builtInTranslatorService;
+    private readonly AppUpdateService _updateService;
     private readonly AppSettings _settings;
     private readonly ObservableCollection<PrefixPattern> _prefixPatterns;
     private CancellationTokenSource? _modelDownloadCancellation;
@@ -36,17 +37,20 @@ public partial class SettingsWindow : Window
     public int TagBackupRetentionCount { get; private set; }
     public IReadOnlyList<PrefixPattern> PrefixPatterns { get; private set; } = [];
     public bool TagDataChanged { get; private set; }
+    public bool AutomaticUpdateCheckEnabled { get; private set; }
 
     public SettingsWindow(
         AppSettings settings,
         ThumbnailCacheStore thumbnailCacheStore,
         TagStore tagStore,
-        BuiltInQwenTranslatorService builtInTranslatorService)
+        BuiltInQwenTranslatorService builtInTranslatorService,
+        AppUpdateService updateService)
     {
         _settings = settings;
         _thumbnailCacheStore = thumbnailCacheStore;
         _tagStore = tagStore;
         _builtInTranslatorService = builtInTranslatorService;
+        _updateService = updateService;
         InitializeComponent();
         _prefixPatterns = new ObservableCollection<PrefixPattern>(
             (settings.PrefixPatterns ?? PrefixPattern.CreateDefaults()).Select(pattern => pattern.Clone()));
@@ -70,6 +74,8 @@ public partial class SettingsWindow : Window
         CacheSizeBox.Text = Math.Clamp(settings.ThumbnailCacheMaxMegabytes, 128, 10240).ToString();
         TagAutoBackupCheckBox.IsChecked = settings.TagAutoBackupEnabled;
         TagBackupRetentionBox.Text = Math.Clamp(settings.TagBackupRetentionCount, 3, 100).ToString();
+        AutomaticUpdateCheckBox.IsChecked = settings.AutomaticUpdateCheckEnabled;
+        CurrentVersionText.Text = $"현재 버전: {updateService.CurrentVersionText}";
         Loaded += async (_, _) => await RefreshCacheStatusAsync();
         Closing += (_, _) => _modelDownloadCancellation?.Cancel();
     }
@@ -144,8 +150,55 @@ public partial class SettingsWindow : Window
         ThumbnailCacheMaxMegabytes = cacheSize;
         TagAutoBackupEnabled = TagAutoBackupCheckBox.IsChecked == true;
         TagBackupRetentionCount = retentionCount;
+        AutomaticUpdateCheckEnabled = AutomaticUpdateCheckBox.IsChecked == true;
         PrefixPatterns = _prefixPatterns.Select(pattern => pattern.Clone()).ToList();
         DialogResult = true;
+    }
+
+    private async void CheckForUpdate_Click(object sender, RoutedEventArgs e)
+    {
+        CheckForUpdateButton.IsEnabled = false;
+        UpdateDownloadProgress.Visibility = Visibility.Collapsed;
+        UpdateStatusText.Text = "새 버전을 확인하는 중…";
+        try
+        {
+            var update = await _updateService.CheckForUpdateAsync();
+            if (update is null)
+            {
+                UpdateStatusText.Text = $"최신 버전을 사용 중입니다. ({_updateService.CurrentVersionText})";
+                return;
+            }
+
+            UpdateStatusText.Text = $"새 버전 {update.VersionText}을 사용할 수 있습니다.";
+            var answer = MessageBox.Show(this,
+                $"TagSeeker {update.VersionText}을 다운로드하고 적용할까요?\n\n" +
+                "준비가 끝나면 프로그램이 종료된 뒤 자동으로 다시 시작됩니다.",
+                "TagSeeker 업데이트", MessageBoxButton.YesNo, MessageBoxImage.Information);
+            if (answer != MessageBoxResult.Yes) return;
+
+            UpdateDownloadProgress.Visibility = Visibility.Visible;
+            var progress = new Progress<double>(value =>
+            {
+                UpdateDownloadProgress.Value = value * 100;
+                UpdateStatusText.Text = value < 0.9
+                    ? $"업데이트 다운로드 중… {value / 0.9:P0}"
+                    : "업데이트 파일을 확인하고 준비하는 중…";
+            });
+            await _updateService.DownloadAndPrepareAsync(update, progress);
+            UpdateStatusText.Text = "업데이트 준비 완료. TagSeeker를 다시 시작합니다…";
+            Application.Current.Shutdown();
+        }
+        catch (Exception ex)
+        {
+            AppLogService.Error("Update", "수동 업데이트 확인 또는 준비에 실패했습니다.", ex);
+            UpdateStatusText.Text = "업데이트를 완료하지 못했습니다. 기존 프로그램은 변경되지 않았습니다.";
+            MessageBox.Show(this, $"업데이트를 완료하지 못했습니다.\n\n{ex.Message}",
+                "TagSeeker 업데이트", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+        finally
+        {
+            CheckForUpdateButton.IsEnabled = true;
+        }
     }
 
     private async void DownloadQwenModel_Click(object sender, RoutedEventArgs e)
@@ -517,6 +570,8 @@ public partial class SettingsWindow : Window
                 TranslationPrefetchEnabled = TranslationPrefetchCheckBox.IsChecked == true,
                 TagAutoBackupEnabled = TagAutoBackupCheckBox.IsChecked == true,
                 TagBackupRetentionCount = int.TryParse(TagBackupRetentionBox.Text, out var retention) ? retention : 10,
+                AutomaticUpdateCheckEnabled = AutomaticUpdateCheckBox.IsChecked == true,
+                LastUpdateCheckUtcTicks = _settings.LastUpdateCheckUtcTicks,
                 ActiveTagSetId = _settings.ActiveTagSetId,
                 PrefixPatterns = _prefixPatterns.Select(pattern => pattern.Clone()).ToList()
             };

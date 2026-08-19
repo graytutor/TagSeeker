@@ -38,6 +38,7 @@ public partial class MainWindow : Window
     private readonly SettingsStore _settingsStore = new();
     private readonly OcrCacheStore _ocrCacheStore = new();
     private readonly ThumbnailCacheStore _thumbnailCacheStore = new();
+    private readonly AppUpdateService _updateService = new();
     private readonly Dictionary<string, ImageTextCacheEntry> _imageTextCache =
         new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _selectedTagNames = new(StringComparer.CurrentCultureIgnoreCase);
@@ -181,6 +182,7 @@ public partial class MainWindow : Window
                 if (startupIndex >= 0)
                     await ShowImageAsync(startupIndex);
             }
+            _ = CheckForUpdatesOnStartupAsync();
         };
     }
 
@@ -254,6 +256,54 @@ public partial class MainWindow : Window
 
         try { _settingsStore.Save(_settings); }
         catch { }
+    }
+
+    private async Task CheckForUpdatesOnStartupAsync()
+    {
+        if (!_settings.AutomaticUpdateCheckEnabled) return;
+        if (_settings.LastUpdateCheckUtcTicks > 0)
+        {
+            try
+            {
+                var lastCheck = new DateTime(_settings.LastUpdateCheckUtcTicks, DateTimeKind.Utc);
+                if (lastCheck > DateTime.UtcNow.AddDays(-1)) return;
+            }
+            catch (ArgumentOutOfRangeException)
+            {
+                _settings.LastUpdateCheckUtcTicks = 0;
+            }
+        }
+
+        try
+        {
+            var update = await _updateService.CheckForUpdateAsync();
+            if (update is null) return;
+            var answer = MessageBox.Show(this,
+                $"새 TagSeeker {update.VersionText} 버전이 있습니다. 지금 업데이트할까요?\n\n" +
+                "다운로드와 확인이 끝나면 프로그램이 자동으로 다시 시작됩니다.",
+                "TagSeeker 업데이트", MessageBoxButton.YesNo, MessageBoxImage.Information);
+            if (answer != MessageBoxResult.Yes) return;
+
+            StatusText.Text = $"TagSeeker {update.VersionText} 업데이트를 다운로드하는 중…";
+            var progress = new Progress<double>(value =>
+                StatusText.Text = value < 0.9
+                    ? $"업데이트 다운로드 중… {value / 0.9:P0}"
+                    : "업데이트를 확인하고 적용 준비 중…");
+            await _updateService.DownloadAndPrepareAsync(update, progress);
+            StatusText.Text = "업데이트 준비 완료. TagSeeker를 다시 시작합니다…";
+            Application.Current.Shutdown();
+        }
+        catch (Exception ex)
+        {
+            AppLogService.Warning("Update", "자동 업데이트 확인 또는 준비에 실패했습니다.", ex);
+            StatusText.Text = "업데이트를 확인하지 못했습니다. 다음에 다시 확인합니다.";
+        }
+        finally
+        {
+            _settings.LastUpdateCheckUtcTicks = DateTime.UtcNow.Ticks;
+            try { await _settingsStore.SaveAsync(_settings); }
+            catch (Exception ex) { AppLogService.Warning("Update", "업데이트 확인 시각을 저장하지 못했습니다.", ex); }
+        }
     }
 
     private async Task LoadFolderAsync(
@@ -2389,7 +2439,7 @@ public partial class MainWindow : Window
         var anchorPath = _visibleImages.FirstOrDefault()?.FullPath;
         _thumbnailCancellation?.Cancel();
         var dialog = new SettingsWindow(
-            _settings, _thumbnailCacheStore, _tagStore, _builtInTranslatorService) { Owner = this };
+            _settings, _thumbnailCacheStore, _tagStore, _builtInTranslatorService, _updateService) { Owner = this };
         var settingsAccepted = dialog.ShowDialog() == true;
         if (dialog.TagDataChanged)
         {
@@ -2419,6 +2469,7 @@ public partial class MainWindow : Window
         _settings.ThumbnailCacheMaxMegabytes = dialog.ThumbnailCacheMaxMegabytes;
         _settings.TagAutoBackupEnabled = dialog.TagAutoBackupEnabled;
         _settings.TagBackupRetentionCount = dialog.TagBackupRetentionCount;
+        _settings.AutomaticUpdateCheckEnabled = dialog.AutomaticUpdateCheckEnabled;
         _settings.PrefixPatterns = dialog.PrefixPatterns.Select(pattern => pattern.Clone()).ToList();
 
         SortFieldBox.SelectedIndex = _settings.ExplorerSortField;

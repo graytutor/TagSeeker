@@ -77,4 +77,6 @@ public sealed class AppSettings
     public int TagBackupRetentionCount { get; set; } = 10;
     public long ActiveTagSetId { get; set; } = TagStore.DefaultTagSetId;
     public long LastTagBackupUtcTicks { get; set; }
+    public bool AutomaticUpdateCheckEnabled { get; set; } = true;
+    public long LastUpdateCheckUtcTicks { get; set; }
 }
