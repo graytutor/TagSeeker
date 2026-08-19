@@ -6,6 +6,7 @@ namespace CustomImageViewer.Services;
 
 public sealed class OcrCacheStore
 {
+    private const int CurrentOcrLayoutVersion = 4;
     public const long MaximumCacheBytes = 250L * 1024 * 1024;
     public static readonly TimeSpan MaximumUnusedAge = TimeSpan.FromDays(180);
     private readonly string _connectionString;
@@ -40,11 +41,30 @@ public sealed class OcrCacheStore
                 TranslatedText TEXT NOT NULL,
                 OverlayLinesJson TEXT NOT NULL,
                 TargetLanguageCode TEXT NOT NULL,
+                TranslationProvider TEXT NOT NULL DEFAULT '',
+                OcrLayoutVersion INTEGER NOT NULL DEFAULT 1,
                 OverlayEnabled INTEGER NOT NULL,
                 UpdatedUtcTicks INTEGER NOT NULL
             );
             """;
         await command.ExecuteNonQueryAsync();
+        var columns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var columnCommand = connection.CreateCommand();
+        columnCommand.CommandText = "PRAGMA table_info(ImageTextCache);";
+        await using (var reader = await columnCommand.ExecuteReaderAsync())
+            while (await reader.ReadAsync()) columns.Add(reader.GetString(1));
+        if (!columns.Contains("TranslationProvider"))
+        {
+            var migrate = connection.CreateCommand();
+            migrate.CommandText = "ALTER TABLE ImageTextCache ADD COLUMN TranslationProvider TEXT NOT NULL DEFAULT '';";
+            await migrate.ExecuteNonQueryAsync();
+        }
+        if (!columns.Contains("OcrLayoutVersion"))
+        {
+            var migrate = connection.CreateCommand();
+            migrate.CommandText = "ALTER TABLE ImageTextCache ADD COLUMN OcrLayoutVersion INTEGER NOT NULL DEFAULT 1;";
+            await migrate.ExecuteNonQueryAsync();
+        }
     }
 
     public async Task<IReadOnlyList<PersistedImageTextEntry>> LoadAllAsync()
@@ -55,9 +75,11 @@ public sealed class OcrCacheStore
         var command = connection.CreateCommand();
         command.CommandText = """
             SELECT OriginalPath, FileLength, LastWriteUtcTicks, OcrResultJson,
-                   TranslatedText, OverlayLinesJson, TargetLanguageCode, OverlayEnabled
-            FROM ImageTextCache;
+                   TranslatedText, OverlayLinesJson, TargetLanguageCode, TranslationProvider, OverlayEnabled
+            FROM ImageTextCache
+            WHERE OcrLayoutVersion = $layoutVersion;
             """;
+        command.Parameters.AddWithValue("$layoutVersion", CurrentOcrLayoutVersion);
         await using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
@@ -68,7 +90,7 @@ public sealed class OcrCacheStore
                 if (ocr is null) continue;
                 entries.Add(new PersistedImageTextEntry(
                     reader.GetString(0), reader.GetInt64(1), reader.GetInt64(2), ocr,
-                    reader.GetString(4), lines, reader.GetString(6), reader.GetInt64(7) != 0));
+                    reader.GetString(4), lines, reader.GetString(6), reader.GetString(7), reader.GetInt64(8) != 0));
             }
             catch
             {
@@ -159,8 +181,10 @@ public sealed class OcrCacheStore
         command.CommandText = """
             INSERT INTO ImageTextCache(
                 PathKey, OriginalPath, FileLength, LastWriteUtcTicks, OcrResultJson,
-                TranslatedText, OverlayLinesJson, TargetLanguageCode, OverlayEnabled, UpdatedUtcTicks)
-            VALUES($key, $path, $length, $modified, $ocr, $translation, $lines, $target, $enabled, $updated)
+                TranslatedText, OverlayLinesJson, TargetLanguageCode, TranslationProvider,
+                OcrLayoutVersion, OverlayEnabled, UpdatedUtcTicks)
+            VALUES($key, $path, $length, $modified, $ocr, $translation, $lines, $target, $provider,
+                   $layoutVersion, $enabled, $updated)
             ON CONFLICT(PathKey) DO UPDATE SET
                 OriginalPath = excluded.OriginalPath,
                 FileLength = excluded.FileLength,
@@ -169,6 +193,8 @@ public sealed class OcrCacheStore
                 TranslatedText = excluded.TranslatedText,
                 OverlayLinesJson = excluded.OverlayLinesJson,
                 TargetLanguageCode = excluded.TargetLanguageCode,
+                TranslationProvider = excluded.TranslationProvider,
+                OcrLayoutVersion = excluded.OcrLayoutVersion,
                 OverlayEnabled = excluded.OverlayEnabled,
                 UpdatedUtcTicks = excluded.UpdatedUtcTicks;
             """;
@@ -180,6 +206,8 @@ public sealed class OcrCacheStore
         command.Parameters.AddWithValue("$translation", entry.TranslatedText);
         command.Parameters.AddWithValue("$lines", JsonSerializer.Serialize(entry.OverlayLines, JsonOptions));
         command.Parameters.AddWithValue("$target", entry.TargetLanguageCode);
+        command.Parameters.AddWithValue("$provider", entry.TranslationProvider);
+        command.Parameters.AddWithValue("$layoutVersion", CurrentOcrLayoutVersion);
         command.Parameters.AddWithValue("$enabled", entry.OverlayEnabled ? 1 : 0);
         command.Parameters.AddWithValue("$updated", DateTime.UtcNow.Ticks);
         await command.ExecuteNonQueryAsync();
@@ -233,4 +261,5 @@ public sealed record PersistedImageTextEntry(
     string TranslatedText,
     IReadOnlyList<string> OverlayLines,
     string TargetLanguageCode,
+    string TranslationProvider,
     bool OverlayEnabled);

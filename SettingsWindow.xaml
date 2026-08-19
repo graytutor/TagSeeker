@@ -4,24 +4,82 @@
         Title="설정" Width="680" Height="610" MinWidth="680" MinHeight="610"
         WindowStartupLocation="CenterOwner" Background="#15181E" Foreground="#F2F4F7">
     <Window.Resources>
+        <SolidColorBrush x:Key="DarkSurfaceBrush" Color="#181B21"/>
+        <SolidColorBrush x:Key="DarkControlBrush" Color="#2A2E36"/>
+        <SolidColorBrush x:Key="DarkBorderBrush" Color="#434A56"/>
+        <SolidColorBrush x:Key="LightTextBrush" Color="#F2F4F7"/>
+        <SolidColorBrush x:Key="MutedTextBrush" Color="#AAB2BF"/>
+        <SolidColorBrush x:Key="LightInputBrush" Color="#FFFFFF"/>
+        <SolidColorBrush x:Key="DarkInputTextBrush" Color="#111318"/>
         <Style TargetType="TextBlock">
             <Setter Property="VerticalAlignment" Value="Center"/>
+            <Setter Property="Foreground" Value="{StaticResource LightTextBrush}"/>
         </Style>
         <Style TargetType="ComboBox">
             <Setter Property="Height" Value="31"/>
             <Setter Property="Margin" Value="5"/>
+            <Setter Property="Background" Value="{StaticResource LightInputBrush}"/>
+            <Setter Property="Foreground" Value="{StaticResource DarkInputTextBrush}"/>
+            <Setter Property="BorderBrush" Value="#AEB4BC"/>
+        </Style>
+        <Style TargetType="ComboBoxItem">
+            <Setter Property="Background" Value="{StaticResource LightInputBrush}"/>
+            <Setter Property="Foreground" Value="{StaticResource DarkInputTextBrush}"/>
+            <Style.Triggers>
+                <Trigger Property="IsSelected" Value="True">
+                    <Setter Property="Background" Value="#2E6EA8"/>
+                    <Setter Property="Foreground" Value="White"/>
+                </Trigger>
+                <Trigger Property="IsHighlighted" Value="True">
+                    <Setter Property="Background" Value="#DCEBFA"/>
+                    <Setter Property="Foreground" Value="#111318"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+        <Style TargetType="TextBox">
+            <Setter Property="Background" Value="{StaticResource LightInputBrush}"/>
+            <Setter Property="Foreground" Value="{StaticResource DarkInputTextBrush}"/>
+            <Setter Property="CaretBrush" Value="{StaticResource DarkInputTextBrush}"/>
+            <Setter Property="BorderBrush" Value="#AEB4BC"/>
+            <Setter Property="SelectionBrush" Value="#6AA9E4"/>
+        </Style>
+        <Style TargetType="CheckBox">
+            <Setter Property="Foreground" Value="{StaticResource LightTextBrush}"/>
+            <Style.Triggers>
+                <Trigger Property="IsEnabled" Value="False">
+                    <Setter Property="Foreground" Value="{StaticResource MutedTextBrush}"/>
+                </Trigger>
+            </Style.Triggers>
         </Style>
         <Style TargetType="Button">
             <Setter Property="Padding" Value="14,7"/>
             <Setter Property="Margin" Value="5"/>
-            <Setter Property="Background" Value="#2A2E36"/>
-            <Setter Property="Foreground" Value="White"/>
-            <Setter Property="BorderBrush" Value="#434A56"/>
+            <Setter Property="Background" Value="{StaticResource DarkControlBrush}"/>
+            <Setter Property="Foreground" Value="{StaticResource LightTextBrush}"/>
+            <Setter Property="BorderBrush" Value="{StaticResource DarkBorderBrush}"/>
+            <Style.Triggers>
+                <Trigger Property="IsEnabled" Value="False">
+                    <Setter Property="Background" Value="#343942"/>
+                    <Setter Property="Foreground" Value="{StaticResource MutedTextBrush}"/>
+                    <Setter Property="BorderBrush" Value="#454B55"/>
+                    <Setter Property="Opacity" Value="0.8"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+        <Style TargetType="TabControl">
+            <Setter Property="Background" Value="{StaticResource DarkSurfaceBrush}"/>
+            <Setter Property="Foreground" Value="{StaticResource LightTextBrush}"/>
         </Style>
         <Style TargetType="TabItem">
             <Setter Property="Padding" Value="14,8"/>
             <Setter Property="Foreground" Value="#E7EAF0"/>
             <Setter Property="Background" Value="#22262E"/>
+            <Style.Triggers>
+                <Trigger Property="IsSelected" Value="True">
+                    <Setter Property="Background" Value="{StaticResource DarkSurfaceBrush}"/>
+                    <Setter Property="Foreground" Value="#70B7FF"/>
+                </Trigger>
+            </Style.Triggers>
         </Style>
     </Window.Resources>
 
@@ -138,27 +196,62 @@
             </TabItem>
 
             <TabItem Header="뷰어 및 번역">
-                <Grid Margin="22">
-                    <Grid.RowDefinitions>
-                        <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
-                        <RowDefinition Height="Auto"/><RowDefinition Height="*"/>
-                    </Grid.RowDefinitions>
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="210"/><ColumnDefinition Width="*"/>
-                    </Grid.ColumnDefinitions>
-                    <TextBlock Grid.Row="0" Grid.ColumnSpan="2" Text="이미지 보기와 번역"
-                               FontSize="18" FontWeight="SemiBold" Foreground="#70B7FF" Margin="0,0,0,12"/>
-                    <TextBlock Grid.Row="1" Text="Esc 키"/>
-                    <CheckBox x:Name="ExitOnEscapeCheckBox" Grid.Row="1" Grid.Column="1"
-                              Content="이미지 화면에서 프로그램 종료" Margin="7,9"/>
-                    <TextBlock Grid.Row="2" Text="기본 번역 결과 언어"/>
-                    <ComboBox x:Name="TargetLanguageBox" Grid.Row="2" Grid.Column="1" SelectedValuePath="Tag">
-                        <ComboBoxItem Content="한국어" Tag="ko"/><ComboBoxItem Content="영어" Tag="en"/>
-                        <ComboBoxItem Content="일본어" Tag="ja"/><ComboBoxItem Content="중국어(간체)" Tag="zh-Hans"/>
-                        <ComboBoxItem Content="중국어(번체)" Tag="zh-Hant"/><ComboBoxItem Content="프랑스어" Tag="fr"/>
-                        <ComboBoxItem Content="독일어" Tag="de"/><ComboBoxItem Content="스페인어" Tag="es"/>
-                    </ComboBox>
-                </Grid>
+                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                    <Grid Margin="22">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="190"/><ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Grid.Row="0" Grid.ColumnSpan="2" Text="이미지 보기와 번역"
+                                   FontSize="18" FontWeight="SemiBold" Foreground="#70B7FF" Margin="0,0,0,12"/>
+                        <TextBlock Grid.Row="1" Text="Esc 키"/>
+                        <CheckBox x:Name="ExitOnEscapeCheckBox" Grid.Row="1" Grid.Column="1"
+                                  Content="이미지 화면에서 프로그램 종료" Margin="7,9"/>
+                        <TextBlock Grid.Row="2" Text="기본 번역 결과 언어"/>
+                        <ComboBox x:Name="TargetLanguageBox" Grid.Row="2" Grid.Column="1" SelectedValuePath="Tag">
+                            <ComboBoxItem Content="한국어" Tag="ko"/><ComboBoxItem Content="영어" Tag="en"/>
+                            <ComboBoxItem Content="일본어" Tag="ja"/><ComboBoxItem Content="중국어(간체)" Tag="zh-Hans"/>
+                            <ComboBoxItem Content="중국어(번체)" Tag="zh-Hant"/><ComboBoxItem Content="프랑스어" Tag="fr"/>
+                            <ComboBoxItem Content="독일어" Tag="de"/><ComboBoxItem Content="스페인어" Tag="es"/>
+                        </ComboBox>
+                        <TextBlock Grid.Row="3" Text="번역 엔진"/>
+                        <ComboBox x:Name="TranslationProviderBox" Grid.Row="3" Grid.Column="1" SelectedValuePath="Tag">
+                            <ComboBoxItem Content="고품질 로컬 AI · Qwen3-8B (추천)" Tag="BuiltInQwen"/>
+                            <ComboBoxItem Content="빠른 무료 온라인 · MyMemory" Tag="MyMemory"/>
+                            <ComboBoxItem Content="외부 로컬 서버 · Ollama" Tag="Ollama"/>
+                        </ComboBox>
+                        <TextBlock Grid.Row="4" Text="Qwen 로컬 모델"/>
+                        <StackPanel Grid.Row="4" Grid.Column="1" Margin="0,5">
+                            <DockPanel>
+                                <Button x:Name="DownloadQwenModelButton" DockPanel.Dock="Left"
+                                        Content="모델 다운로드 (약 5GB)" Click="DownloadQwenModel_Click"/>
+                                <TextBlock x:Name="QwenModelStatusText" Margin="9,0,0,0" VerticalAlignment="Center"
+                                           Foreground="#8FC9FF" TextWrapping="Wrap"/>
+                            </DockPanel>
+                            <ProgressBar x:Name="QwenDownloadProgress" Height="7" Margin="0,7,0,0"
+                                         Minimum="0" Maximum="100" Visibility="Collapsed"/>
+                        </StackPanel>
+                        <DockPanel Grid.Row="5" Grid.Column="1" Margin="0,4">
+                            <Button DockPanel.Dock="Right" Content="찾아보기…" Click="BrowseQwenModelFolder_Click"/>
+                            <TextBox x:Name="QwenModelFolderBox" Margin="0,0,7,0" VerticalContentAlignment="Center"/>
+                        </DockPanel>
+                        <TextBlock Grid.Row="5" Text="모델 저장 폴더"/>
+                        <TextBlock Grid.Row="6" Text="Ollama 서버"/>
+                        <TextBox x:Name="OllamaEndpointBox" Grid.Row="6" Grid.Column="1"/>
+                        <TextBlock Grid.Row="7" Text="Ollama 모델"/>
+                        <TextBox x:Name="OllamaModelBox" Grid.Row="7" Grid.Column="1"/>
+                        <TextBlock Grid.Row="8" Text="번역 사전 처리"/>
+                        <CheckBox x:Name="TranslationPrefetchCheckBox" Grid.Row="8" Grid.Column="1"
+                                  Content="다음 이미지를 백그라운드에서 미리 번역 (CPU·네트워크 사용 증가)"
+                                  Margin="7,9"/>
+                    </Grid>
+                </ScrollViewer>
             </TabItem>
 
             <TabItem Header="태그 데이터">

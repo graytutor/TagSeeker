@@ -14,8 +14,11 @@ public partial class SettingsWindow : Window
 {
     private readonly ThumbnailCacheStore _thumbnailCacheStore;
     private readonly TagStore _tagStore;
+    private readonly BuiltInQwenTranslatorService _builtInTranslatorService;
     private readonly AppSettings _settings;
     private readonly ObservableCollection<PrefixPattern> _prefixPatterns;
+    private CancellationTokenSource? _modelDownloadCancellation;
+    private bool _modelStorageOperationActive;
     public int ExplorerPageSize { get; private set; }
     public int MouseWheelSpeedMultiplier { get; private set; }
     public int ExplorerSortField { get; private set; }
@@ -23,6 +26,11 @@ public partial class SettingsWindow : Window
     public bool ExplorerFoldersFirst { get; private set; }
     public bool ExitOnEscape { get; private set; }
     public string TargetLanguageCode { get; private set; } = "ko";
+    public string TranslationProvider { get; private set; } = BuiltInQwenTranslatorService.ProviderId;
+    public string QwenModelFolder { get; private set; } = BuiltInQwenTranslatorService.DefaultModelFolder;
+    public string OllamaEndpoint { get; private set; } = "http://localhost:11434";
+    public string OllamaModel { get; private set; } = "qwen3:1.7b";
+    public bool TranslationPrefetchEnabled { get; private set; }
     public int ThumbnailCacheMaxMegabytes { get; private set; }
     public bool TagAutoBackupEnabled { get; private set; }
     public int TagBackupRetentionCount { get; private set; }
@@ -32,11 +40,13 @@ public partial class SettingsWindow : Window
     public SettingsWindow(
         AppSettings settings,
         ThumbnailCacheStore thumbnailCacheStore,
-        TagStore tagStore)
+        TagStore tagStore,
+        BuiltInQwenTranslatorService builtInTranslatorService)
     {
         _settings = settings;
         _thumbnailCacheStore = thumbnailCacheStore;
         _tagStore = tagStore;
+        _builtInTranslatorService = builtInTranslatorService;
         InitializeComponent();
         _prefixPatterns = new ObservableCollection<PrefixPattern>(
             (settings.PrefixPatterns ?? PrefixPattern.CreateDefaults()).Select(pattern => pattern.Clone()));
@@ -49,13 +59,22 @@ public partial class SettingsWindow : Window
         ExitOnEscapeCheckBox.IsChecked = settings.ExitOnEscape;
         TargetLanguageBox.SelectedValue = settings.TargetLanguageCode;
         if (TargetLanguageBox.SelectedIndex < 0) TargetLanguageBox.SelectedValue = "ko";
+        TranslationProviderBox.SelectedValue = settings.TranslationProvider;
+        if (TranslationProviderBox.SelectedIndex < 0)
+            TranslationProviderBox.SelectedValue = BuiltInQwenTranslatorService.ProviderId;
+        QwenModelFolderBox.Text = _builtInTranslatorService.ModelFolder;
+        OllamaEndpointBox.Text = settings.OllamaEndpoint;
+        OllamaModelBox.Text = settings.OllamaModel;
+        RefreshQwenModelStatus();
+        TranslationPrefetchCheckBox.IsChecked = settings.TranslationPrefetchEnabled;
         CacheSizeBox.Text = Math.Clamp(settings.ThumbnailCacheMaxMegabytes, 128, 10240).ToString();
         TagAutoBackupCheckBox.IsChecked = settings.TagAutoBackupEnabled;
         TagBackupRetentionBox.Text = Math.Clamp(settings.TagBackupRetentionCount, 3, 100).ToString();
         Loaded += async (_, _) => await RefreshCacheStatusAsync();
+        Closing += (_, _) => _modelDownloadCancellation?.Cancel();
     }
 
-    private void Apply_Click(object sender, RoutedEventArgs e)
+    private async void Apply_Click(object sender, RoutedEventArgs e)
     {
         if (!int.TryParse(PageSizeBox.Text.Trim(), out var pageSize) || pageSize is < 100 or > 1000)
         {
@@ -112,11 +131,171 @@ public partial class SettingsWindow : Window
         ExplorerFoldersFirst = FoldersFirstCheckBox.IsChecked == true;
         ExitOnEscape = ExitOnEscapeCheckBox.IsChecked == true;
         TargetLanguageCode = TargetLanguageBox.SelectedValue?.ToString() ?? "ko";
+        TranslationProvider = TranslationProviderBox.SelectedValue?.ToString()
+            ?? BuiltInQwenTranslatorService.ProviderId;
+        if (!await TryConfigureQwenModelFolderAsync()) return;
+        OllamaEndpoint = string.IsNullOrWhiteSpace(OllamaEndpointBox.Text)
+            ? "http://localhost:11434"
+            : OllamaEndpointBox.Text.Trim();
+        OllamaModel = string.IsNullOrWhiteSpace(OllamaModelBox.Text)
+            ? "qwen3:1.7b"
+            : OllamaModelBox.Text.Trim();
+        TranslationPrefetchEnabled = TranslationPrefetchCheckBox.IsChecked == true;
         ThumbnailCacheMaxMegabytes = cacheSize;
         TagAutoBackupEnabled = TagAutoBackupCheckBox.IsChecked == true;
         TagBackupRetentionCount = retentionCount;
         PrefixPatterns = _prefixPatterns.Select(pattern => pattern.Clone()).ToList();
         DialogResult = true;
+    }
+
+    private async void DownloadQwenModel_Click(object sender, RoutedEventArgs e)
+    {
+        if (!await TryConfigureQwenModelFolderAsync()) return;
+        if (_builtInTranslatorService.IsModelInstalled)
+        {
+            RefreshQwenModelStatus();
+            return;
+        }
+
+        _modelDownloadCancellation?.Cancel();
+        _modelDownloadCancellation?.Dispose();
+        _modelDownloadCancellation = new CancellationTokenSource();
+        DownloadQwenModelButton.IsEnabled = false;
+        QwenDownloadProgress.Visibility = Visibility.Visible;
+        QwenDownloadProgress.Value = 0;
+        QwenModelStatusText.Text = "다운로드 준비 중…";
+        var progress = new Progress<double>(value =>
+        {
+            QwenDownloadProgress.Value = value * 100;
+            QwenModelStatusText.Text = $"다운로드 중… {value:P0}";
+        });
+
+        try
+        {
+            await _builtInTranslatorService.DownloadModelAsync(progress, _modelDownloadCancellation.Token);
+            RefreshQwenModelStatus();
+        }
+        catch (OperationCanceledException)
+        {
+            QwenModelStatusText.Text = "다운로드를 취소했습니다.";
+        }
+        catch (Exception ex)
+        {
+            AppLogService.Error("Translation", "Qwen 로컬 모델 다운로드 실패", ex);
+            QwenModelStatusText.Text = "다운로드 실패";
+            MessageBox.Show(this, $"모델을 다운로드하지 못했습니다.\n\n{ex.Message}", "번역 모델",
+                MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+        finally
+        {
+            DownloadQwenModelButton.IsEnabled = true;
+            if (!_builtInTranslatorService.IsModelInstalled)
+                QwenDownloadProgress.Visibility = Visibility.Collapsed;
+        }
+    }
+
+    private void RefreshQwenModelStatus()
+    {
+        var installed = _builtInTranslatorService.IsModelInstalled;
+        QwenModelStatusText.Text = installed
+            ? $"설치됨 · {BuiltInQwenTranslatorService.ModelDisplayName}\n{_builtInTranslatorService.ModelPath}"
+            : $"설치되지 않음 · 최초 1회 다운로드 필요\n{_builtInTranslatorService.ModelPath}";
+        DownloadQwenModelButton.Content = installed ? "모델 설치 완료" : "모델 다운로드 (약 5GB)";
+        DownloadQwenModelButton.IsEnabled = !installed;
+        QwenDownloadProgress.Visibility = installed ? Visibility.Visible : Visibility.Collapsed;
+        QwenDownloadProgress.Value = installed ? 100 : 0;
+    }
+
+    private async void BrowseQwenModelFolder_Click(object sender, RoutedEventArgs e)
+    {
+        var initial = Directory.Exists(QwenModelFolderBox.Text.Trim())
+            ? QwenModelFolderBox.Text.Trim()
+            : _builtInTranslatorService.ModelFolder;
+        var dialog = new OpenFolderDialog
+        {
+            Title = "Qwen 번역 모델 저장 폴더 선택",
+            InitialDirectory = initial
+        };
+        if (dialog.ShowDialog(this) != true) return;
+        QwenModelFolderBox.Text = dialog.FolderName;
+        if (await TryConfigureQwenModelFolderAsync()) RefreshQwenModelStatus();
+    }
+
+    private async Task<bool> TryConfigureQwenModelFolderAsync()
+    {
+        if (_modelStorageOperationActive) return false;
+        try
+        {
+            var requested = string.IsNullOrWhiteSpace(QwenModelFolderBox.Text)
+                ? BuiltInQwenTranslatorService.DefaultModelFolder
+                : Path.GetFullPath(QwenModelFolderBox.Text.Trim());
+            Directory.CreateDirectory(requested);
+            if (!string.Equals(
+                    requested,
+                    _builtInTranslatorService.ModelFolder,
+                    StringComparison.OrdinalIgnoreCase)
+                && _builtInTranslatorService.IsModelInstalled
+                && !BuiltInQwenTranslatorService.IsModelInstalledIn(requested))
+            {
+                var answer = MessageBox.Show(this,
+                    "현재 설치된 Qwen 모델을 새 저장 폴더로 이동할까요?\n\n" +
+                    "다른 드라이브로 옮길 때에는 약 5GB를 복사하므로 시간이 걸릴 수 있습니다. " +
+                    "복사가 완료될 때까지 기존 파일은 유지됩니다.\n\n" +
+                    "예: 모델 이동\n아니요: 새 위치를 사용하고 필요할 때 다시 다운로드",
+                    "번역 모델 이동", MessageBoxButton.YesNoCancel, MessageBoxImage.Question);
+                if (answer == MessageBoxResult.Cancel) return false;
+                if (answer == MessageBoxResult.Yes)
+                {
+                    _modelStorageOperationActive = true;
+                    _modelDownloadCancellation?.Cancel();
+                    _modelDownloadCancellation?.Dispose();
+                    _modelDownloadCancellation = new CancellationTokenSource();
+                    DownloadQwenModelButton.IsEnabled = false;
+                    QwenDownloadProgress.Visibility = Visibility.Visible;
+                    QwenDownloadProgress.Value = 0;
+                    QwenModelStatusText.Text = "기존 모델을 새 폴더로 이동하는 중…";
+                    var progress = new Progress<double>(value =>
+                    {
+                        QwenDownloadProgress.Value = value * 100;
+                        QwenModelStatusText.Text = $"기존 모델 이동 중… {value:P0}";
+                    });
+                    try
+                    {
+                        await _builtInTranslatorService.MoveInstalledModelAsync(
+                            requested, progress, _modelDownloadCancellation.Token);
+                    }
+                    finally
+                    {
+                        _modelStorageOperationActive = false;
+                        DownloadQwenModelButton.IsEnabled = true;
+                    }
+                }
+                else
+                {
+                    await _builtInTranslatorService.ConfigureModelFolderAsync(requested);
+                }
+            }
+            else
+            {
+                await _builtInTranslatorService.ConfigureModelFolderAsync(requested);
+            }
+            QwenModelFolder = _builtInTranslatorService.ModelFolder;
+            QwenModelFolderBox.Text = QwenModelFolder;
+            return true;
+        }
+        catch (OperationCanceledException)
+        {
+            QwenModelStatusText.Text = "모델 이동을 취소했습니다. 기존 모델은 원래 위치에 있습니다.";
+            return false;
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this,
+                $"모델 저장 폴더를 사용할 수 없습니다.\n\n{ex.Message}",
+                "번역 모델", MessageBoxButton.OK, MessageBoxImage.Warning);
+            QwenModelFolderBox.Focus();
+            return false;
+        }
     }
 
     private void AddPrefixPattern_Click(object sender, RoutedEventArgs e)
@@ -330,6 +509,12 @@ public partial class SettingsWindow : Window
                 ExplorerSortDescending = SortDirectionBox.SelectedIndex == 1,
                 ExplorerFoldersFirst = FoldersFirstCheckBox.IsChecked == true,
                 TargetLanguageCode = TargetLanguageBox.SelectedValue?.ToString() ?? "ko",
+                TranslationProvider = TranslationProviderBox.SelectedValue?.ToString()
+                    ?? BuiltInQwenTranslatorService.ProviderId,
+                QwenModelFolder = QwenModelFolderBox.Text.Trim(),
+                OllamaEndpoint = OllamaEndpointBox.Text.Trim(),
+                OllamaModel = OllamaModelBox.Text.Trim(),
+                TranslationPrefetchEnabled = TranslationPrefetchCheckBox.IsChecked == true,
                 TagAutoBackupEnabled = TagAutoBackupCheckBox.IsChecked == true,
                 TagBackupRetentionCount = int.TryParse(TagBackupRetentionBox.Text, out var retention) ? retention : 10,
                 ActiveTagSetId = _settings.ActiveTagSetId,

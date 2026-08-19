@@ -1,5 +1,5 @@
 #define MyAppName "TagSeeker"
-#define MyAppVersion "1.1.0"
+#define MyAppVersion "1.1.2"
 #define MyAppPublisher "TagSeeker"
 #define MyAppExeName "TagSeeker.exe"
 #define PublishDir "..\bin\publish\TagSeeker-win-x64"

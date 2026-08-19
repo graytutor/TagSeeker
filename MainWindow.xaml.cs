@@ -5,6 +5,7 @@ using System.Collections.ObjectModel;
 using System.IO;
 using System.Net.Http;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
@@ -19,6 +20,7 @@ namespace CustomImageViewer;
 
 public partial class MainWindow : Window
 {
+    private const int TranslationPrefetchImageCount = 4;
     private readonly BulkObservableCollection<ImageFileItem> _images = [];
     private readonly BulkObservableCollection<ImageFileItem> _visibleImages = [];
     private readonly BulkObservableCollection<PrefixFilterOption> _visiblePrefixOptions = [];
@@ -31,6 +33,7 @@ public partial class MainWindow : Window
     private readonly WindowsOcrService _ocrService = new();
     private readonly PaddleOcrService _localOcrService = new();
     private readonly OllamaTranslatorService _translatorService = new();
+    private readonly BuiltInQwenTranslatorService _builtInTranslatorService = new();
     private readonly MyMemoryTranslatorService _freeTranslatorService = new();
     private readonly SettingsStore _settingsStore = new();
     private readonly OcrCacheStore _ocrCacheStore = new();
@@ -71,6 +74,8 @@ public partial class MainWindow : Window
     private int _currentIndex = -1;
     private ViewerMode _viewerMode = ViewerMode.FitIncludingSmall;
     private bool _isNavigating;
+    private bool _continuousTranslationEnabled;
+    private string? _continuousTranslationFolder;
     private bool _translationOverlayVisible;
     private bool _restoringCachedTextState;
     private bool _isMouseFolderNavigating;
@@ -117,12 +122,14 @@ public partial class MainWindow : Window
         Closing += (_, _) =>
         {
             DisposeFolderWatcher();
+            _ocrCancellation?.Cancel();
             SaveUserSettings();
         };
         Loaded += async (_, _) =>
         {
             await _tagStore.InitializeAsync();
             _settings = await _settingsStore.LoadAsync();
+            await _builtInTranslatorService.ConfigureModelFolderAsync(_settings.QwenModelFolder);
             await RefreshTagSetsAsync(_settings.ActiveTagSetId);
             // The initial folder can contain many images. Show the active tag set
             // before OCR-cache maintenance and thumbnail decoding begin.
@@ -133,7 +140,7 @@ public partial class MainWindow : Window
                 _imageTextCache[entry.ImagePath] = new ImageTextCacheEntry(
                     entry.FileLength, entry.LastWriteUtcTicks, entry.OcrResult,
                     entry.TranslatedText, entry.OverlayLines,
-                    entry.TargetLanguageCode, entry.OverlayEnabled);
+                    entry.TargetLanguageCode, entry.TranslationProvider, entry.OverlayEnabled);
             if (_settings.TagAutoBackupEnabled
                 && (_settings.LastTagBackupUtcTicks <= 0
                     || new DateTime(_settings.LastTagBackupUtcTicks, DateTimeKind.Utc) < DateTime.UtcNow.AddDays(-1)))
@@ -279,6 +286,8 @@ public partial class MainWindow : Window
             NormalizeFolderLocationKey(_currentFolder),
             NormalizeFolderLocationKey(normalizedFolder),
             StringComparison.OrdinalIgnoreCase);
+        if (folderIsChanging && _continuousTranslationEnabled)
+            DisableContinuousTranslation();
         if (captureCurrentLocation
             && !tagFilterWasActive
             && Directory.Exists(_currentFolder))
@@ -886,6 +895,8 @@ public partial class MainWindow : Window
         if (_currentIndex < 0 || _currentIndex >= _images.Count) return;
 
         _ocrCancellation?.Cancel();
+        _ocrCancellation?.Dispose();
+        _ocrCancellation = null;
         ResetActiveTextState();
         StopAnimation();
         _viewerCancellation?.Cancel();
@@ -932,7 +943,13 @@ public partial class MainWindow : Window
             ViewerPosition.Text =
                 $"전체 이미지 {imageCount:N0}개 중 {imagePosition:N0}번째  ·  {current.PixelWidth:N0} × {current.PixelHeight:N0}";
 
-            RestoreCachedTextState(selectedPath);
+            RestoreCachedTextState(
+                selectedPath,
+                showOverlay: !_continuousTranslationEnabled,
+                restoreTargetLanguage: !_continuousTranslationEnabled);
+
+            if (_continuousTranslationEnabled && IsContinuousTranslationFolder())
+                _ = EnsureVisibleImagesTranslatedAsync(showErrors: false);
 
             if (_viewerMode is not (ViewerMode.DualLeftToRight or ViewerMode.DualRightToLeft)
                 && _magickDecoder.CanDecodeAnimation(selectedPath))
@@ -2371,7 +2388,8 @@ public partial class MainWindow : Window
         SaveUserSettings();
         var anchorPath = _visibleImages.FirstOrDefault()?.FullPath;
         _thumbnailCancellation?.Cancel();
-        var dialog = new SettingsWindow(_settings, _thumbnailCacheStore, _tagStore) { Owner = this };
+        var dialog = new SettingsWindow(
+            _settings, _thumbnailCacheStore, _tagStore, _builtInTranslatorService) { Owner = this };
         var settingsAccepted = dialog.ShowDialog() == true;
         if (dialog.TagDataChanged)
         {
@@ -2392,6 +2410,12 @@ public partial class MainWindow : Window
         _settings.ExplorerFoldersFirst = dialog.ExplorerFoldersFirst;
         _settings.ExitOnEscape = dialog.ExitOnEscape;
         _settings.TargetLanguageCode = dialog.TargetLanguageCode;
+        _settings.TranslationProvider = dialog.TranslationProvider;
+        _settings.QwenModelFolder = dialog.QwenModelFolder;
+        await _builtInTranslatorService.ConfigureModelFolderAsync(_settings.QwenModelFolder);
+        _settings.OllamaEndpoint = dialog.OllamaEndpoint;
+        _settings.OllamaModel = dialog.OllamaModel;
+        _settings.TranslationPrefetchEnabled = dialog.TranslationPrefetchEnabled;
         _settings.ThumbnailCacheMaxMegabytes = dialog.ThumbnailCacheMaxMegabytes;
         _settings.TagAutoBackupEnabled = dialog.TagAutoBackupEnabled;
         _settings.TagBackupRetentionCount = dialog.TagBackupRetentionCount;
@@ -2469,7 +2493,7 @@ public partial class MainWindow : Window
         if (ViewerView.Visibility == Visibility.Visible) await RefreshViewerImagesAsync();
     }
 
-    private async Task RecognizeCurrentImageAsync(bool showPanel = true)
+    private async Task RecognizeCurrentImageAsync(bool showPanel = true, bool showErrors = true)
     {
         if (_currentIndex < 0 || _currentIndex >= _images.Count || !_images[_currentIndex].IsImage) return;
         var imagePath = _images[_currentIndex].FullPath;
@@ -2477,7 +2501,10 @@ public partial class MainWindow : Window
         if (RestoreCachedTextState(imagePath)) return;
 
         _ocrCancellation?.Cancel();
-        _ocrCancellation = new CancellationTokenSource();
+        _ocrCancellation?.Dispose();
+        var ocrCancellation = new CancellationTokenSource();
+        _ocrCancellation = ocrCancellation;
+        var cancellationToken = ocrCancellation.Token;
         OcrPanelButton.IsEnabled = false;
         DetectedOcrLanguageText.Text = "언어 감지 중…";
         OcrSourceTextBox.Text = "문자를 인식하는 중…";
@@ -2488,19 +2515,19 @@ public partial class MainWindow : Window
             OcrTextResult result;
             try
             {
-                result = await _localOcrService.RecognizeAsync(
-                    imagePath, _ocrCancellation.Token);
+                result = await RecognizeWithLocalEnginesAsync(imagePath, cancellationToken);
+                if (cancellationToken.IsCancellationRequested) return;
                 if (string.IsNullOrWhiteSpace(result.Text))
                     result = await _ocrService.RecognizeAsync(
-                        imagePath, null, _ocrCancellation.Token);
+                        imagePath, null, cancellationToken);
             }
-            catch (Exception ex) when (!_ocrCancellation.IsCancellationRequested)
+            catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
             {
                 AppLogService.Warning("OCR", $"로컬 OCR 실패, Windows OCR로 대체: {imagePath}", ex);
                 // Some older CPUs or unusual image encodings may not be accepted by
                 // Paddle. Keep the existing Windows OCR as an automatic fallback.
                 result = await _ocrService.RecognizeAsync(
-                    imagePath, null, _ocrCancellation.Token);
+                    imagePath, null, cancellationToken);
             }
             await StoreOcrResultAsync(imagePath, result);
             if (!IsCurrentImage(imagePath)) return;
@@ -2526,8 +2553,11 @@ public partial class MainWindow : Window
         {
             AppLogService.Error("OCR", $"문자 인식 실패: {imagePath}", ex);
             OcrSourceTextBox.Clear();
-            MessageBox.Show(this, $"문자 인식에 실패했습니다.\n\n{ex.Message}", "OCR",
-                MessageBoxButton.OK, MessageBoxImage.Information);
+            if (showErrors)
+                MessageBox.Show(this, $"문자 인식에 실패했습니다.\n\n{ex.Message}", "OCR",
+                    MessageBoxButton.OK, MessageBoxImage.Information);
+            else if (IsCurrentImage(imagePath))
+                TranslationStatusText.Text = $"자동 문자 인식 실패: {ex.Message}";
         }
         finally
         {
@@ -2535,152 +2565,395 @@ public partial class MainWindow : Window
         }
     }
 
-    private async void TranslateText_Click(object sender, RoutedEventArgs e)
+    private async void TranslateText_Click(object sender, RoutedEventArgs e) =>
+        await TranslateCurrentTextAsync(showErrors: true);
+
+    private async Task<OcrTextResult> RecognizeWithLocalEnginesAsync(
+        string imagePath,
+        CancellationToken cancellationToken)
+    {
+        var paddle = await _localOcrService.RecognizeAsync(imagePath, cancellationToken);
+        if (cancellationToken.IsCancellationRequested
+            || !paddle.RecognizedLanguageTag.Equals("ja", StringComparison.OrdinalIgnoreCase))
+            return paddle;
+
+        try
+        {
+            var windows = await _ocrService.RecognizeAsync(imagePath, "ja", cancellationToken);
+            return ScoreJapaneseOcr(windows) > ScoreJapaneseOcr(paddle) ? windows : paddle;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            AppLogService.Warning("OCR", $"Windows 일본어 OCR 보완 실패: {imagePath}", ex);
+            return paddle;
+        }
+    }
+
+    private static int ScoreJapaneseOcr(OcrTextResult result)
+    {
+        var score = 0;
+        foreach (var rune in result.Text.EnumerateRunes())
+        {
+            var value = rune.Value;
+            if (value is >= 0x3040 and <= 0x30FF) score += 5;
+            else if (value is >= 0x3400 and <= 0x9FFF) score += 2;
+            else if (Rune.IsLetter(rune)) score -= 1;
+            else if (Rune.IsDigit(rune)) score -= 2;
+        }
+        return score;
+    }
+
+    private async Task<bool> TranslateCurrentTextAsync(bool showErrors)
     {
         var text = OcrSourceTextBox.Text.Trim();
-        if (string.IsNullOrWhiteSpace(text) || text == "인식된 문자가 없습니다.") return;
-        if (_currentIndex < 0 || _currentIndex >= _images.Count) return;
+        if (string.IsNullOrWhiteSpace(text) || text == "인식된 문자가 없습니다.") return false;
+        if (_currentIndex < 0 || _currentIndex >= _images.Count) return false;
         var imagePath = _images[_currentIndex].FullPath;
+        _ocrCancellation ??= new CancellationTokenSource();
+        var cancellationToken = _ocrCancellation.Token;
         try
         {
             TranslatedTextBox.Text = "번역하는 중…";
             var targetItem = TargetLanguageBox.SelectedItem as ComboBoxItem;
             var targetName = targetItem?.Content?.ToString() ?? "한국어";
             var targetCode = targetItem?.Tag?.ToString() ?? "ko";
-            var provider = (TranslationProviderBox.SelectedItem as ComboBoxItem)?.Tag?.ToString();
-
-            string translatedText;
-            if (provider == "Ollama")
-            {
-                var model = OllamaModelBox.Text.Trim();
-                translatedText = await _translatorService.TranslateAsync(
-                    text, targetName, model, OllamaEndpointBox.Text, CancellationToken.None);
-            }
-            else
-            {
-                translatedText = await _freeTranslatorService.TranslateAsync(
-                    text, _lastDetectedOcrLanguage, targetCode, CancellationToken.None);
-            }
-            var overlayLines = System.Text.RegularExpressions.Regex
-                .Split(translatedText.Trim(), @"\r?\n\s*\r?\n")
-                .Where(block => !string.IsNullOrWhiteSpace(block))
-                .ToList();
+            var translation = _lastOcrResult is not null
+                ? await TranslateOcrResultUsingConfiguredEngineAsync(
+                    _lastOcrResult, targetName, targetCode, cancellationToken)
+                : new TranslationOutput(
+                    await TranslateUsingConfiguredEngineAsync(
+                        text, _lastDetectedOcrLanguage, targetName, targetCode, cancellationToken),
+                    []);
+            var translatedText = translation.Text;
+            var overlayLines = translation.OverlayLines;
             await StoreTranslationAsync(imagePath, translatedText, overlayLines, targetCode, overlayEnabled: true);
-            if (!IsCurrentImage(imagePath)) return;
+            if (!IsCurrentImage(imagePath)) return false;
             TranslatedTextBox.Text = translatedText;
             _translatedOverlayLines = overlayLines;
             _translationOverlayVisible = true;
             UpdateTranslationButton();
             OcrPanelButton.IsEnabled = true;
             RenderTranslationOverlay();
+            return true;
         }
+        catch (OperationCanceledException) { return false; }
         catch (HttpRequestException ex) when (ex.InnerException is System.Net.Sockets.SocketException)
         {
             AppLogService.Warning("Translation", $"번역 서버 연결 실패: {imagePath}", ex);
-            if (!IsCurrentImage(imagePath)) return;
+            if (!IsCurrentImage(imagePath)) return false;
             TranslatedTextBox.Clear();
             _translationOverlayVisible = false;
             UpdateTranslationButton();
             OcrPanelButton.IsEnabled = true;
-            var isLocal = (TranslationProviderBox.SelectedItem as ComboBoxItem)?.Tag?.ToString() == "Ollama";
-            var message = isLocal
+            var isOllama = _settings.TranslationProvider == "Ollama";
+            var message = isOllama
                 ? "로컬 번역 서버에 연결할 수 없습니다. Ollama가 설치되어 실행 중인지 확인하세요.\n\n" +
                   "설치 후 터미널에서 ollama pull qwen3:1.7b 를 한 번 실행하면 됩니다."
                 : "무료 온라인 번역 서비스에 연결할 수 없습니다. 인터넷 연결을 확인하거나 잠시 후 다시 시도하세요.";
-            MessageBox.Show(this, message, isLocal ? "로컬 번역" : "온라인 번역",
-                MessageBoxButton.OK, MessageBoxImage.Information);
+            if (showErrors)
+                MessageBox.Show(this, message, isOllama ? "로컬 번역" : "온라인 번역",
+                    MessageBoxButton.OK, MessageBoxImage.Information);
+            else
+                TranslationStatusText.Text = message.Split('\n')[0];
+            return false;
         }
         catch (Exception ex)
         {
             AppLogService.Error("Translation", $"번역 실패: {imagePath}", ex);
-            if (!IsCurrentImage(imagePath)) return;
+            if (!IsCurrentImage(imagePath)) return false;
             TranslatedTextBox.Clear();
             _translationOverlayVisible = false;
             UpdateTranslationButton();
             OcrPanelButton.IsEnabled = true;
-            MessageBox.Show(this, ex.Message, "번역", MessageBoxButton.OK, MessageBoxImage.Information);
+            if (showErrors)
+                MessageBox.Show(this, ex.Message, "번역", MessageBoxButton.OK, MessageBoxImage.Information);
+            else
+                TranslationStatusText.Text = $"자동 번역 실패: {ex.Message}";
+            return false;
         }
     }
 
-    private async void CheckOllama_Click(object sender, RoutedEventArgs e)
+    private Task<string> TranslateUsingConfiguredEngineAsync(
+        string text,
+        string sourceLanguage,
+        string targetLanguageName,
+        string targetLanguageCode,
+        CancellationToken cancellationToken)
     {
-        try
+        if (AreSameTranslationLanguage(sourceLanguage, targetLanguageCode))
+            return Task.FromResult(text);
+
+        return _settings.TranslationProvider switch
         {
-            OllamaStatusText.Text = "확인하는 중…";
-            var models = await _translatorService.GetInstalledModelsAsync(OllamaEndpointBox.Text, CancellationToken.None);
-            OllamaModelBox.Items.Clear();
-            foreach (var model in models) OllamaModelBox.Items.Add(model);
-            if (models.Count > 0 && string.IsNullOrWhiteSpace(OllamaModelBox.Text)) OllamaModelBox.SelectedIndex = 0;
-            OllamaStatusText.Text = models.Count == 0
-                ? "연결됨 · 설치된 모델 없음"
-                : $"연결됨 · 모델 {models.Count:N0}개";
-        }
-        catch
-        {
-            OllamaStatusText.Text = "연결 실패 · Ollama 실행 상태를 확인하세요.";
-        }
+            BuiltInQwenTranslatorService.ProviderId => _builtInTranslatorService.TranslateAsync(
+                text, sourceLanguage, targetLanguageName, cancellationToken),
+            "Ollama" => _translatorService.TranslateAsync(
+                text, targetLanguageName, _settings.OllamaModel,
+                _settings.OllamaEndpoint, cancellationToken),
+            _ => _freeTranslatorService.TranslateAsync(
+                text, sourceLanguage, targetLanguageCode, cancellationToken)
+        };
     }
 
-    private async void TranslationProviderBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    private async Task<TranslationOutput> TranslateOcrResultUsingConfiguredEngineAsync(
+        OcrTextResult ocrResult,
+        string targetLanguageName,
+        string targetLanguageCode,
+        CancellationToken cancellationToken)
     {
-        if (!IsLoaded || (TranslationProviderBox.SelectedItem as ComboBoxItem)?.Tag?.ToString() != "Ollama")
-            return;
-
-        try
+        if (AreSameTranslationLanguage(ocrResult.RecognizedLanguageTag, targetLanguageCode))
         {
-            var models = await _translatorService.GetInstalledModelsAsync(OllamaEndpointBox.Text, CancellationToken.None);
-            if (models.Count == 0)
-                throw new InvalidOperationException("설치된 로컬 모델이 없습니다.");
+            var originals = ocrResult.Lines.Select(line => line.Text).ToList();
+            return new TranslationOutput(
+                string.Join(Environment.NewLine + Environment.NewLine, originals), originals);
+        }
 
-            OllamaModelBox.Items.Clear();
-            foreach (var model in models) OllamaModelBox.Items.Add(model);
-            if (!models.Contains(OllamaModelBox.Text, StringComparer.OrdinalIgnoreCase))
-                OllamaModelBox.SelectedIndex = 0;
-            OllamaStatusText.Text = $"사용 가능 · 모델 {models.Count:N0}개";
-        }
-        catch
+        if (_settings.TranslationProvider == BuiltInQwenTranslatorService.ProviderId
+            && ocrResult.Lines.Count > 0)
         {
-            TranslationProviderBox.SelectedIndex = 0;
-            OllamaStatusText.Text = "사용 불가 · Ollama 또는 로컬 모델이 설치되지 않았습니다.";
-            MessageBox.Show(this,
-                "이 PC에는 로컬 번역 엔진이나 번역 모델이 준비되어 있지 않습니다.\n\n" +
-                "별도 설치 없이 사용하려면 '온라인 무료 (바로 사용)'를 선택하세요. " +
-                "로컬 번역은 Ollama와 모델이 설치된 PC에서만 사용할 수 있습니다.",
-                "로컬 번역을 사용할 수 없음", MessageBoxButton.OK, MessageBoxImage.Information);
+            var translatedBlocks = await _builtInTranslatorService.TranslateBlocksAsync(
+                ocrResult.Lines.Select(line => line.Text).ToList(),
+                ocrResult.RecognizedLanguageTag,
+                targetLanguageName,
+                cancellationToken);
+            var blocks = translatedBlocks.Select(block => block.Trim()).ToList();
+            return new TranslationOutput(
+                string.Join(Environment.NewLine + Environment.NewLine, blocks), blocks);
         }
+
+        var translatedText = await TranslateUsingConfiguredEngineAsync(
+            ocrResult.Text, ocrResult.RecognizedLanguageTag,
+            targetLanguageName, targetLanguageCode, cancellationToken);
+        var overlayLines = System.Text.RegularExpressions.Regex
+            .Split(translatedText.Trim(), @"\r?\n\s*\r?\n")
+            .Where(block => !string.IsNullOrWhiteSpace(block))
+            .ToList();
+        return new TranslationOutput(translatedText, overlayLines);
+    }
+
+    private string CurrentTranslationCacheProvider =>
+        _settings.TranslationProvider == BuiltInQwenTranslatorService.ProviderId
+            ? BuiltInQwenTranslatorService.CacheProviderId
+            : _settings.TranslationProvider;
+
+    private static bool AreSameTranslationLanguage(string source, string target)
+    {
+        if (source.StartsWith("zh", StringComparison.OrdinalIgnoreCase)
+            || target.StartsWith("zh", StringComparison.OrdinalIgnoreCase))
+            return string.Equals(source, target, StringComparison.OrdinalIgnoreCase);
+        var sourceBase = source.Split('-', '_')[0];
+        var targetBase = target.Split('-', '_')[0];
+        return string.Equals(sourceBase, targetBase, StringComparison.OrdinalIgnoreCase);
     }
 
     private async void ShowOcrPanel_Click(object sender, RoutedEventArgs e) => await RecognizeCurrentImageAsync();
     private async void TranslationButton_Click(object sender, RoutedEventArgs e)
     {
         if (_currentIndex < 0 || _currentIndex >= _images.Count || !_images[_currentIndex].IsImage) return;
-        var imagePath = _images[_currentIndex].FullPath;
 
-        if (_translationOverlayVisible)
+        if (_continuousTranslationEnabled)
         {
-            ClearTranslationOverlay();
-            _translatedOverlayLines = [];
-            _translationOverlayVisible = false;
+            var imagePath = _images[_currentIndex].FullPath;
+            var companionIndex = _viewerMode is ViewerMode.DualLeftToRight or ViewerMode.DualRightToLeft
+                ? FindImageIndex(_currentIndex, 1, 1)
+                : -1;
+            DisableContinuousTranslation();
             await SetCachedOverlayEnabledAsync(imagePath, false);
-            UpdateTranslationButton();
+            if (companionIndex >= 0)
+                await SetCachedOverlayEnabledAsync(_images[companionIndex].FullPath, false);
             return;
         }
 
+        _continuousTranslationEnabled = true;
+        _continuousTranslationFolder = NormalizeFolderLocationKey(_currentFolder);
+        UpdateTranslationButton();
+        await EnsureVisibleImagesTranslatedAsync(showErrors: true);
+    }
+
+    private async Task EnsureVisibleImagesTranslatedAsync(bool showErrors)
+    {
+        if (!_continuousTranslationEnabled || !IsContinuousTranslationFolder()
+            || _currentIndex < 0 || _currentIndex >= _images.Count)
+            return;
+
+        var anchorPath = _images[_currentIndex].FullPath;
+        var currentTask = EnsureCurrentImageTranslatedAsync(showErrors);
+        var targetItem = TargetLanguageBox.SelectedItem as ComboBoxItem;
+        var targetName = targetItem?.Content?.ToString() ?? "한국어";
+        var targetCode = targetItem?.Tag?.ToString() ?? "ko";
+        if (_viewerMode is not (ViewerMode.DualLeftToRight or ViewerMode.DualRightToLeft))
+        {
+            await currentTask;
+            if (IsCurrentImage(anchorPath) && _continuousTranslationEnabled && IsContinuousTranslationFolder())
+            {
+                UpdateTranslationButton();
+                StartTranslationPrefetch(anchorPath, _currentIndex, targetName, targetCode);
+            }
+            return;
+        }
+
+        var companionIndex = FindImageIndex(_currentIndex, 1, 1);
+        if (companionIndex < 0)
+        {
+            await currentTask;
+            if (IsCurrentImage(anchorPath) && _continuousTranslationEnabled && IsContinuousTranslationFolder())
+                StartTranslationPrefetch(anchorPath, _currentIndex, targetName, targetCode);
+            return;
+        }
+
+        var companionPath = _images[companionIndex].FullPath;
+        _ocrCancellation ??= new CancellationTokenSource();
+        var cancellationToken = _ocrCancellation.Token;
+        var companionTask = EnsureImageTranslationCachedAsync(
+            companionPath, targetName, targetCode, cancellationToken, showErrors: false);
+        TranslationStatusText.Text = "연속 번역: 두 페이지를 동시에 처리하고 있습니다.";
+
+        await Task.WhenAll(currentTask, companionTask);
+
+        if (IsCurrentImage(anchorPath) && _continuousTranslationEnabled && IsContinuousTranslationFolder())
+        {
+            UpdateTranslationButton();
+            RenderTranslationOverlay();
+            StartTranslationPrefetch(anchorPath, companionIndex, targetName, targetCode);
+        }
+    }
+
+    private void StartTranslationPrefetch(
+        string anchorPath,
+        int lastVisibleIndex,
+        string targetName,
+        string targetCode)
+    {
+        if (!_settings.TranslationPrefetchEnabled) return;
+        _ocrCancellation ??= new CancellationTokenSource();
+        _ = PrefetchUpcomingTranslationsAsync(
+            anchorPath, lastVisibleIndex, targetName, targetCode, _ocrCancellation.Token);
+    }
+
+    private async Task PrefetchUpcomingTranslationsAsync(
+        string anchorPath,
+        int lastVisibleIndex,
+        string targetName,
+        string targetCode,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var nextIndex = lastVisibleIndex;
+            for (var count = 0; count < TranslationPrefetchImageCount; count++)
+            {
+                if (!_settings.TranslationPrefetchEnabled || !_continuousTranslationEnabled
+                    || !IsContinuousTranslationFolder() || !IsCurrentImage(anchorPath))
+                    return;
+
+                nextIndex = FindImageIndex(nextIndex, 1, 1);
+                if (nextIndex < 0) return;
+                await EnsureImageTranslationCachedAsync(
+                    _images[nextIndex].FullPath, targetName, targetCode, cancellationToken, showErrors: false);
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            AppLogService.Warning("Translation", $"다음 페이지 번역 미리 준비 실패: {anchorPath}", ex);
+        }
+    }
+
+    private async Task<bool> EnsureImageTranslationCachedAsync(
+        string imagePath,
+        string targetName,
+        string targetCode,
+        CancellationToken cancellationToken,
+        bool showErrors)
+    {
+        try
+        {
+            if (_imageTextCache.TryGetValue(imagePath, out var cached) && cached.IsCurrent(imagePath) &&
+                !string.IsNullOrWhiteSpace(cached.TranslatedText) && cached.OverlayLines.Count > 0 &&
+                string.Equals(cached.TargetLanguageCode, targetCode, StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(cached.TranslationProvider, CurrentTranslationCacheProvider, StringComparison.OrdinalIgnoreCase))
+            {
+                if (!cached.OverlayEnabled)
+                    await SetCachedOverlayEnabledAsync(imagePath, true);
+                return true;
+            }
+
+            OcrTextResult ocrResult;
+            if (cached is not null && cached.IsCurrent(imagePath) && !string.IsNullOrWhiteSpace(cached.OcrResult.Text))
+            {
+                ocrResult = cached.OcrResult;
+            }
+            else
+            {
+                try
+                {
+                    ocrResult = await RecognizeWithLocalEnginesAsync(imagePath, cancellationToken);
+                    if (cancellationToken.IsCancellationRequested) return false;
+                    if (string.IsNullOrWhiteSpace(ocrResult.Text))
+                        ocrResult = await _ocrService.RecognizeAsync(imagePath, null, cancellationToken);
+                }
+                catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+                {
+                    AppLogService.Warning("OCR", $"두 페이지 보기 로컬 OCR 실패, Windows OCR로 대체: {imagePath}", ex);
+                    ocrResult = await _ocrService.RecognizeAsync(imagePath, null, cancellationToken);
+                }
+
+                await StoreOcrResultAsync(imagePath, ocrResult);
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            if (string.IsNullOrWhiteSpace(ocrResult.Text)) return false;
+
+            var translation = await TranslateOcrResultUsingConfiguredEngineAsync(
+                ocrResult, targetName, targetCode, cancellationToken);
+            var translatedText = translation.Text;
+            var overlayLines = translation.OverlayLines;
+            await StoreTranslationAsync(imagePath, translatedText, overlayLines, targetCode, overlayEnabled: true);
+            return true;
+        }
+        catch (OperationCanceledException)
+        {
+            return false;
+        }
+        catch (Exception ex)
+        {
+            AppLogService.Error("Translation", $"두 페이지 보기 자동 번역 실패: {imagePath}", ex);
+            if (showErrors)
+                MessageBox.Show(this, ex.Message, "번역", MessageBoxButton.OK, MessageBoxImage.Information);
+            return false;
+        }
+    }
+
+    private async Task EnsureCurrentImageTranslatedAsync(bool showErrors)
+    {
+        if (!_continuousTranslationEnabled || !IsContinuousTranslationFolder()
+            || _currentIndex < 0 || _currentIndex >= _images.Count || !_images[_currentIndex].IsImage)
+            return;
+
+        var imagePath = _images[_currentIndex].FullPath;
         var requestedTargetCode = (TargetLanguageBox.SelectedItem as ComboBoxItem)?.Tag?.ToString() ?? "ko";
         if (_imageTextCache.TryGetValue(imagePath, out var cached) && cached.IsCurrent(imagePath) &&
-            !string.IsNullOrWhiteSpace(cached.TranslatedText) &&
-            string.Equals(cached.TargetLanguageCode, requestedTargetCode, StringComparison.OrdinalIgnoreCase))
+            !string.IsNullOrWhiteSpace(cached.TranslatedText) && cached.OverlayLines.Count > 0 &&
+            string.Equals(cached.TargetLanguageCode, requestedTargetCode, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(cached.TranslationProvider, CurrentTranslationCacheProvider, StringComparison.OrdinalIgnoreCase))
         {
             await SetCachedOverlayEnabledAsync(imagePath, true);
-            RestoreCachedTextState(imagePath);
+            if (IsCurrentImage(imagePath))
+                RestoreCachedTextState(imagePath, showOverlay: true, restoreTargetLanguage: false);
             return;
         }
 
         OcrPanelButton.IsEnabled = false;
         OcrPanelButton.Content = _lastOcrResult is null ? "인식 중…" : "번역 중…";
-        TranslationStatusText.Text = _lastOcrResult is null ? "문자를 자동으로 인식하고 있습니다." : "번역하고 있습니다.";
+        TranslationStatusText.Text = _lastOcrResult is null
+            ? "연속 번역: 문자를 자동으로 인식하고 있습니다."
+            : "연속 번역: 번역하고 있습니다.";
         if (_lastOcrResult is null)
-            await RecognizeCurrentImageAsync(showPanel: false);
+            await RecognizeCurrentImageAsync(showPanel: false, showErrors: showErrors);
         if (!IsCurrentImage(imagePath) || _lastOcrResult is null)
         {
             OcrPanelButton.IsEnabled = true;
@@ -2688,28 +2961,39 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (string.IsNullOrWhiteSpace(OcrSourceTextBox.Text))
+        if (string.IsNullOrWhiteSpace(OcrSourceTextBox.Text)
+            || OcrSourceTextBox.Text == "인식된 문자가 없습니다.")
         {
             OcrPanelButton.IsEnabled = true;
             UpdateTranslationButton();
+            TranslationStatusText.Text = "연속 번역: 인식된 문자가 없습니다. 다음 이미지로 이동하면 다시 시도합니다.";
             return;
         }
 
         TargetLanguageBox.SelectedValue = requestedTargetCode;
         OcrPanelButton.Content = "번역 중…";
-        TranslationStatusText.Text = "인식된 문장을 번역하고 있습니다.";
-        TranslateText_Click(sender, e);
+        TranslationStatusText.Text = "연속 번역: 인식된 문장을 번역하고 있습니다.";
+        var translated = await TranslateCurrentTextAsync(showErrors);
+        if (IsCurrentImage(imagePath))
+        {
+            OcrPanelButton.IsEnabled = true;
+            UpdateTranslationButton();
+            if (!translated)
+                TranslationStatusText.Text = "연속 번역을 완료하지 못했습니다. 다음 이미지에서 다시 시도합니다.";
+        }
     }
 
     private async void TargetLanguageBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (!IsLoaded || _restoringCachedTextState || !_translationOverlayVisible) return;
+        if (!IsLoaded || _restoringCachedTextState) return;
         if (_currentIndex >= 0 && _currentIndex < _images.Count)
             await SetCachedOverlayEnabledAsync(_images[_currentIndex].FullPath, false);
         ClearTranslationOverlay();
         _translatedOverlayLines = [];
         _translationOverlayVisible = false;
         UpdateTranslationButton();
+        if (_continuousTranslationEnabled && ViewerView.Visibility == Visibility.Visible)
+            await EnsureVisibleImagesTranslatedAsync(showErrors: true);
     }
 
     private void CloseOcrPanel_Click(object sender, RoutedEventArgs e) => OcrPanel.Visibility = Visibility.Collapsed;
@@ -2738,7 +3022,10 @@ public partial class MainWindow : Window
         UpdateTranslationButton();
     }
 
-    private bool RestoreCachedTextState(string imagePath)
+    private bool RestoreCachedTextState(
+        string imagePath,
+        bool showOverlay = true,
+        bool restoreTargetLanguage = true)
     {
         if (!_imageTextCache.TryGetValue(imagePath, out var entry) || !entry.IsCurrent(imagePath))
         {
@@ -2749,17 +3036,22 @@ public partial class MainWindow : Window
 
         _lastOcrResult = entry.OcrResult;
         _lastDetectedOcrLanguage = entry.OcrResult.RecognizedLanguageTag;
-        _translatedOverlayLines = entry.OverlayEnabled ? entry.OverlayLines : [];
+        var translationMatchesProvider = string.Equals(
+            entry.TranslationProvider, CurrentTranslationCacheProvider, StringComparison.OrdinalIgnoreCase);
+        _translatedOverlayLines = showOverlay && entry.OverlayEnabled && translationMatchesProvider
+            ? entry.OverlayLines
+            : [];
         OcrSourceTextBox.Text = entry.OcrResult.Text;
-        TranslatedTextBox.Text = entry.TranslatedText;
-        if (!string.IsNullOrWhiteSpace(entry.TargetLanguageCode))
+        TranslatedTextBox.Text = translationMatchesProvider ? entry.TranslatedText : string.Empty;
+        if (translationMatchesProvider && restoreTargetLanguage && !string.IsNullOrWhiteSpace(entry.TargetLanguageCode))
         {
             _restoringCachedTextState = true;
             try { TargetLanguageBox.SelectedValue = entry.TargetLanguageCode; }
             finally { _restoringCachedTextState = false; }
         }
         SetDetectedLanguageLabel(entry.OcrResult.RecognizedLanguageTag);
-        _translationOverlayVisible = entry.OverlayEnabled && entry.OverlayLines.Count > 0;
+        _translationOverlayVisible = showOverlay && entry.OverlayEnabled && translationMatchesProvider
+            && entry.OverlayLines.Count > 0;
         UpdateTranslationButton();
         _ = TouchCacheSafelyAsync(imagePath);
         if (_translationOverlayVisible)
@@ -2771,7 +3063,7 @@ public partial class MainWindow : Window
     {
         var info = new FileInfo(imagePath);
         var entry = new ImageTextCacheEntry(
-            info.Length, info.LastWriteTimeUtc.Ticks, result, string.Empty, [], string.Empty, false);
+            info.Length, info.LastWriteTimeUtc.Ticks, result, string.Empty, [], string.Empty, string.Empty, false);
         _imageTextCache[imagePath] = entry;
         await PersistCacheEntryAsync(imagePath, entry);
     }
@@ -2790,6 +3082,7 @@ public partial class MainWindow : Window
                 TranslatedText = translatedText,
                 OverlayLines = overlayLines,
                 TargetLanguageCode = targetLanguageCode,
+                TranslationProvider = CurrentTranslationCacheProvider,
                 OverlayEnabled = overlayEnabled
             };
             _imageTextCache[imagePath] = updated;
@@ -2810,7 +3103,8 @@ public partial class MainWindow : Window
     private Task PersistCacheEntryAsync(string imagePath, ImageTextCacheEntry entry) =>
         _ocrCacheStore.SaveAsync(new PersistedImageTextEntry(
             imagePath, entry.FileLength, entry.LastWriteUtcTicks, entry.OcrResult,
-            entry.TranslatedText, entry.OverlayLines, entry.TargetLanguageCode, entry.OverlayEnabled));
+            entry.TranslatedText, entry.OverlayLines, entry.TargetLanguageCode,
+            entry.TranslationProvider, entry.OverlayEnabled));
 
     private async Task TouchCacheSafelyAsync(string imagePath)
     {
@@ -2821,11 +3115,34 @@ public partial class MainWindow : Window
     private void UpdateTranslationButton()
     {
         if (OcrPanelButton is null) return;
-        OcrPanelButton.Content = _translationOverlayVisible ? "번역 끄기" : "번역";
+        OcrPanelButton.Content = _continuousTranslationEnabled ? "번역 끄기" : "번역";
         if (TranslationStatusText is not null)
-            TranslationStatusText.Text = _translationOverlayVisible
-                ? "번역 레이어가 표시되고 있습니다."
+            TranslationStatusText.Text = _continuousTranslationEnabled
+                ? (_translationOverlayVisible
+                    ? "연속 번역이 켜져 있습니다. 다음 이미지도 자동 번역합니다."
+                    : "연속 번역이 켜져 있습니다.")
                 : "언어를 선택한 뒤 번역을 누르세요.";
+    }
+
+    private bool IsContinuousTranslationFolder() =>
+        _continuousTranslationFolder is not null &&
+        string.Equals(
+            _continuousTranslationFolder,
+            NormalizeFolderLocationKey(_currentFolder),
+            StringComparison.OrdinalIgnoreCase);
+
+    private void DisableContinuousTranslation()
+    {
+        _ocrCancellation?.Cancel();
+        _ocrCancellation?.Dispose();
+        _ocrCancellation = null;
+        _continuousTranslationEnabled = false;
+        _continuousTranslationFolder = null;
+        ClearTranslationOverlay();
+        _translatedOverlayLines = [];
+        _translationOverlayVisible = false;
+        OcrPanelButton.IsEnabled = true;
+        UpdateTranslationButton();
     }
 
     private bool IsCurrentImage(string imagePath) =>
@@ -2850,9 +3167,12 @@ public partial class MainWindow : Window
     private void RenderTranslationOverlay()
     {
         ClearTranslationOverlay();
-        if (_lastOcrResult is null || _translatedOverlayLines.Count == 0)
-            return;
         if (_viewerMode is ViewerMode.DualLeftToRight or ViewerMode.DualRightToLeft)
+        {
+            RenderDualTranslationOverlays();
+            return;
+        }
+        if (_lastOcrResult is null || _translatedOverlayLines.Count == 0)
             return;
 
         var source = FlexibleImage.Source as BitmapSource ?? FitImage.Source as BitmapSource ?? OriginalImage.Source as BitmapSource;
@@ -2860,18 +3180,63 @@ public partial class MainWindow : Window
         if (!TryGetRenderedImageBounds(source, out var imageBounds))
             imageBounds = new Rect(0, 0, TranslationOverlayCanvas.ActualWidth, TranslationOverlayCanvas.ActualHeight);
 
-        var lineCount = Math.Min(_lastOcrResult.Lines.Count, _translatedOverlayLines.Count);
+        var viewport = new Rect(0, 0, TranslationOverlayCanvas.ActualWidth, TranslationOverlayCanvas.ActualHeight);
+        RenderTranslationOverlayEntry(_lastOcrResult, _translatedOverlayLines, source, imageBounds, viewport);
+    }
+
+    private void RenderDualTranslationOverlays()
+    {
+        if (_currentIndex < 0 || _currentIndex >= _images.Count) return;
+        var companionIndex = FindImageIndex(_currentIndex, 1, 1);
+        var currentPath = _images[_currentIndex].FullPath;
+        var companionPath = companionIndex >= 0 ? _images[companionIndex].FullPath : null;
+        var viewport = new Rect(0, 0, TranslationOverlayCanvas.ActualWidth, TranslationOverlayCanvas.ActualHeight);
+
+        if (_viewerMode == ViewerMode.DualLeftToRight)
+        {
+            RenderCachedDualPage(currentPath, DualLeftImage, viewport);
+            if (companionPath is not null) RenderCachedDualPage(companionPath, DualRightImage, viewport);
+        }
+        else
+        {
+            if (companionPath is not null) RenderCachedDualPage(companionPath, DualLeftImage, viewport);
+            RenderCachedDualPage(currentPath, DualRightImage, viewport);
+        }
+    }
+
+    private void RenderCachedDualPage(string imagePath, Image imageControl, Rect viewport)
+    {
+        if (!_imageTextCache.TryGetValue(imagePath, out var entry) || !entry.IsCurrent(imagePath)
+            || !entry.OverlayEnabled || entry.OverlayLines.Count == 0
+            || !string.Equals(entry.TranslationProvider, CurrentTranslationCacheProvider, StringComparison.OrdinalIgnoreCase)
+            || imageControl.Source is not BitmapSource source
+            || !TryGetRenderedImageBounds(imageControl, source, out var imageBounds))
+            return;
+
+        RenderTranslationOverlayEntry(entry.OcrResult, entry.OverlayLines, source, imageBounds, viewport);
+    }
+
+    private void RenderTranslationOverlayEntry(
+        OcrTextResult ocrResult,
+        IReadOnlyList<string> overlayLines,
+        BitmapSource source,
+        Rect imageBounds,
+        Rect viewport)
+    {
+        var firstChildIndex = TranslationOverlayCanvas.Children.Count;
+
+        var lineCount = Math.Min(ocrResult.Lines.Count, overlayLines.Count);
         var scaleX = imageBounds.Width / source.PixelWidth;
         var scaleY = imageBounds.Height / source.PixelHeight;
-        var viewport = new Rect(0, 0, TranslationOverlayCanvas.ActualWidth, TranslationOverlayCanvas.ActualHeight);
         var visibleImageBounds = Rect.Intersect(imageBounds, viewport);
+        if (visibleImageBounds.IsEmpty) return;
         var placedBounds = new List<Rect>();
         var addedCount = 0;
-        var omittedCount = Math.Max(0, _translatedOverlayLines.Count - lineCount);
+        var omittedCount = Math.Max(0, overlayLines.Count - lineCount);
         for (var index = 0; index < lineCount; index++)
         {
-            var region = _lastOcrResult.Lines[index];
-            var translated = _translatedOverlayLines[index].Trim();
+            var region = ocrResult.Lines[index];
+            var translated = overlayLines[index].Trim();
             if (translated.Length == 0) continue;
 
             var originalLeft = imageBounds.Left + region.X * scaleX;
@@ -2903,12 +3268,19 @@ public partial class MainWindow : Window
             };
             text.Measure(new Size(Math.Max(1, width - 8), double.PositiveInfinity));
             var height = Math.Max(originalHeight, Math.Ceiling(text.DesiredSize.Height) + 8);
-            if (height > visibleImageBounds.Height)
+            while (text.DesiredSize.Height + 8 > visibleImageBounds.Height && text.FontSize > 5)
             {
-                text.FontSize = 9;
+                text.FontSize -= 0.5;
                 text.Measure(new Size(Math.Max(1, width - 8), double.PositiveInfinity));
-                height = Math.Min(visibleImageBounds.Height, Math.Ceiling(text.DesiredSize.Height) + 8);
             }
+            if (text.DesiredSize.Height + 8 > visibleImageBounds.Height)
+            {
+                omittedCount++;
+                continue;
+            }
+            height = Math.Min(
+                visibleImageBounds.Height,
+                Math.Max(originalHeight, Math.Ceiling(text.DesiredSize.Height) + 8));
 
             var left = originalLeft + originalWidth / 2 - width / 2;
             left = Math.Clamp(left, visibleImageBounds.Left, Math.Max(visibleImageBounds.Left, visibleImageBounds.Right - width));
@@ -2943,8 +3315,9 @@ public partial class MainWindow : Window
         // replace the individual boxes with one complete, measured overlay.
         if (addedCount == 0 || omittedCount > 0)
         {
-            ClearTranslationOverlay();
-            AddFallbackTranslationOverlay(imageBounds, viewport);
+            while (TranslationOverlayCanvas.Children.Count > firstChildIndex)
+                TranslationOverlayCanvas.Children.RemoveAt(TranslationOverlayCanvas.Children.Count - 1);
+            AddFallbackTranslationOverlay(imageBounds, viewport, overlayLines);
         }
     }
 
@@ -2984,27 +3357,49 @@ public partial class MainWindow : Window
     private static bool Fits(Rect candidate, Rect bounds, IReadOnlyList<Rect> occupied) =>
         bounds.Contains(candidate) && occupied.All(existing => !existing.IntersectsWith(candidate));
 
-    private void AddFallbackTranslationOverlay(Rect imageBounds, Rect viewport)
+    private void AddFallbackTranslationOverlay(
+        Rect imageBounds,
+        Rect viewport,
+        IReadOnlyList<string> overlayLines)
     {
-        var translated = string.Join(Environment.NewLine, _translatedOverlayLines).Trim();
+        var translated = string.Join(Environment.NewLine, overlayLines).Trim();
         if (translated.Length == 0 || viewport.Width <= 0 || viewport.Height <= 0) return;
-        var width = Math.Min(Math.Max(260, imageBounds.Width * 0.8), Math.Max(1, viewport.Width - 24));
+        var visibleBounds = Rect.Intersect(imageBounds, viewport);
+        if (visibleBounds.IsEmpty) return;
+        const double outerMargin = 6;
+        const double innerPadding = 10;
+        var width = Math.Max(1, visibleBounds.Width - outerMargin * 2);
+        var availableHeight = Math.Max(1, visibleBounds.Height - outerMargin * 2);
+        var contentWidth = Math.Max(1, width - innerPadding * 2);
         var text = new TextBlock
         {
             Text = translated,
             Foreground = Brushes.White,
             FontSize = 15,
             TextWrapping = TextWrapping.Wrap,
-            TextAlignment = TextAlignment.Left
+            TextAlignment = TextAlignment.Left,
+            Width = contentWidth
         };
-        text.Measure(new Size(Math.Max(1, width - 24), double.PositiveInfinity));
-        var availableHeight = Math.Max(1, Math.Min(imageBounds.Bottom, viewport.Bottom) - Math.Max(imageBounds.Top, viewport.Top) - 24);
-        while (text.DesiredSize.Height + 24 > availableHeight && text.FontSize > 8)
+        text.Measure(new Size(contentWidth, double.PositiveInfinity));
+        while (text.DesiredSize.Height + innerPadding * 2 > availableHeight && text.FontSize > 5)
         {
-            text.FontSize -= 1;
-            text.Measure(new Size(Math.Max(1, width - 24), double.PositiveInfinity));
+            text.FontSize -= 0.5;
+            text.Measure(new Size(contentWidth, double.PositiveInfinity));
         }
-        var height = Math.Min(availableHeight, Math.Ceiling(text.DesiredSize.Height) + 24);
+        var requiresFinalScaling = text.DesiredSize.Height + innerPadding * 2 > availableHeight;
+        var height = requiresFinalScaling
+            ? availableHeight
+            : Math.Min(availableHeight, Math.Ceiling(text.DesiredSize.Height) + innerPadding * 2);
+        UIElement content = text;
+        if (requiresFinalScaling)
+        {
+            content = new Viewbox
+            {
+                Stretch = Stretch.Uniform,
+                StretchDirection = StretchDirection.DownOnly,
+                Child = text
+            };
+        }
         var border = new Border
         {
             Width = width,
@@ -3013,14 +3408,33 @@ public partial class MainWindow : Window
             BorderBrush = new SolidColorBrush(Color.FromArgb(230, 112, 183, 255)),
             BorderThickness = new Thickness(2),
             CornerRadius = new CornerRadius(6),
-            Padding = new Thickness(12),
-            Child = text
+            Padding = new Thickness(innerPadding),
+            Child = content
         };
-        var left = Math.Clamp(imageBounds.Left + 12, 12, Math.Max(12, viewport.Width - width - 12));
-        var top = Math.Clamp(imageBounds.Top + 12, 12, Math.Max(12, viewport.Height - height - 12));
+        var left = visibleBounds.Left + outerMargin;
+        var top = visibleBounds.Top + outerMargin;
         Canvas.SetLeft(border, left);
         Canvas.SetTop(border, top);
         TranslationOverlayCanvas.Children.Add(border);
+    }
+
+    private bool TryGetRenderedImageBounds(Image imageControl, BitmapSource source, out Rect bounds)
+    {
+        bounds = Rect.Empty;
+        if (!imageControl.IsVisible || imageControl.ActualWidth <= 0 || imageControl.ActualHeight <= 0)
+            return false;
+
+        var controlBounds = imageControl.TransformToVisual(TranslationOverlayCanvas)
+            .TransformBounds(new Rect(0, 0, imageControl.ActualWidth, imageControl.ActualHeight));
+        var scale = Math.Min(controlBounds.Width / source.PixelWidth, controlBounds.Height / source.PixelHeight);
+        var width = source.PixelWidth * scale;
+        var height = source.PixelHeight * scale;
+        bounds = new Rect(
+            controlBounds.Left + (controlBounds.Width - width) / 2,
+            controlBounds.Top + (controlBounds.Height - height) / 2,
+            width,
+            height);
+        return !bounds.IsEmpty;
     }
 
     private bool TryGetRenderedImageBounds(BitmapSource source, out Rect bounds)
@@ -3067,6 +3481,10 @@ public enum ViewerMode
     DualRightToLeft
 }
 
+internal sealed record TranslationOutput(
+    string Text,
+    IReadOnlyList<string> OverlayLines);
+
 internal sealed record ImageTextCacheEntry(
     long FileLength,
     long LastWriteUtcTicks,
@@ -3074,6 +3492,7 @@ internal sealed record ImageTextCacheEntry(
     string TranslatedText,
     IReadOnlyList<string> OverlayLines,
     string TargetLanguageCode,
+    string TranslationProvider,
     bool OverlayEnabled)
 {
     public bool IsCurrent(string imagePath)

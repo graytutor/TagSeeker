@@ -52,6 +52,11 @@ public sealed class AppSettings
     public string? LastFolderPath { get; set; }
     public int ViewerMode { get; set; }
     public string TargetLanguageCode { get; set; } = "ko";
+    public string TranslationProvider { get; set; } = BuiltInQwenTranslatorService.ProviderId;
+    public string QwenModelFolder { get; set; } = string.Empty;
+    public string OllamaEndpoint { get; set; } = "http://localhost:11434";
+    public string OllamaModel { get; set; } = "qwen3:1.7b";
+    public bool TranslationPrefetchEnabled { get; set; } = true;
     public bool ExitOnEscape { get; set; }
     public double WindowWidth { get; set; } = 1180;
     public double WindowHeight { get; set; } = 760;

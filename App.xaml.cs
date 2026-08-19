@@ -1,5 +1,6 @@
 using System.IO;
 using System.Windows;
+using System.Windows.Input;
 using System.Windows.Threading;
 using CustomImageViewer.Services;
 
@@ -11,6 +12,11 @@ public partial class App : Application
 
     protected override void OnStartup(StartupEventArgs e)
     {
+        EventManager.RegisterClassHandler(
+            typeof(Window),
+            Keyboard.PreviewKeyDownEvent,
+            new KeyEventHandler(ClosePopupWindowOnEscape));
+
         AppLogService.Initialize();
         if (e.Args.FirstOrDefault() is { Length: > 0 } argument)
         {
@@ -35,6 +41,15 @@ public partial class App : Application
             args.SetObserved();
         };
         base.OnStartup(e);
+    }
+
+    private static void ClosePopupWindowOnEscape(object sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.Escape || sender is not Window window || window is MainWindow)
+            return;
+
+        e.Handled = true;
+        window.Close();
     }
 
     protected override void OnExit(ExitEventArgs e)

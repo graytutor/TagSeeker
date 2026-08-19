@@ -396,32 +396,10 @@
                     <DockPanel Grid.Row="2" Margin="0,8">
                         <Button DockPanel.Dock="Right" Content="전체 복사" Click="CopyOcrText_Click"/>
                         <Button DockPanel.Dock="Right" Content="번역" Click="TranslateText_Click"/>
-                        <ComboBox x:Name="TranslationProviderBox" DockPanel.Dock="Right" Width="155" Margin="3" SelectedIndex="0"
-                                  SelectionChanged="TranslationProviderBox_SelectionChanged">
-                            <ComboBoxItem Content="온라인 무료 (바로 사용)" Tag="MyMemory"/>
-                            <ComboBoxItem Content="로컬 (Ollama 필요)" Tag="Ollama"/>
-                        </ComboBox>
                         <TextBlock DockPanel.Dock="Left" Text="상단에서 결과 언어 선택" Foreground="#B9C0CA" VerticalAlignment="Center"/>
                     </DockPanel>
                     <TextBox x:Name="TranslatedTextBox" Grid.Row="3" AcceptsReturn="True" TextWrapping="Wrap"
                              VerticalScrollBarVisibility="Auto" IsReadOnly="True"/>
-                    <Expander Grid.Row="4" Header="번역 방식 안내 및 로컬 설정" Foreground="#D8DCE2" Margin="0,9,0,0">
-                        <StackPanel Margin="5">
-                            <TextBlock Text="'온라인 무료'는 설치나 키 없이 작동하지만 OCR 문장이 MyMemory 서비스로 전송되며 공개 서비스 사용량 제한이 적용됩니다."
-                                       Foreground="#F0C989" TextWrapping="Wrap" Margin="0,0,0,9"/>
-                            <TextBlock Text="구독과 API 키 없이 PC 안에서 번역합니다. 최초 1회 Ollama와 모델 설치가 필요합니다."
-                                       Foreground="#AEB6C2" TextWrapping="Wrap" Margin="0,0,0,7"/>
-                            <TextBlock Text="서버" Foreground="#AEB6C2"/>
-                            <TextBox x:Name="OllamaEndpointBox" Margin="0,4,0,7" Text="http://localhost:11434"/>
-                            <TextBlock Text="모델" Foreground="#AEB6C2"/>
-                            <ComboBox x:Name="OllamaModelBox" Margin="0,4,0,7" IsEditable="True" Text="qwen3:1.7b"/>
-                            <DockPanel>
-                                <Button DockPanel.Dock="Left" Content="연결 및 모델 확인" Click="CheckOllama_Click"/>
-                                <TextBlock x:Name="OllamaStatusText" Foreground="#8FC9FF" VerticalAlignment="Center"
-                                           Text="설치 명령: ollama pull qwen3:1.7b" Margin="8,0,0,0" TextWrapping="Wrap"/>
-                            </DockPanel>
-                        </StackPanel>
-                    </Expander>
                 </Grid>
             </Border>
         </Grid>

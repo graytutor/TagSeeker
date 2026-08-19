@@ -79,7 +79,10 @@ public sealed class WindowsOcrService
                 var top = line.Words.Min(word => word.BoundingRect.Y);
                 var right = line.Words.Max(word => word.BoundingRect.X + word.BoundingRect.Width);
                 var bottom = line.Words.Max(word => word.BoundingRect.Y + word.BoundingRect.Height);
-                return new OcrLineRegion(line.Text, left, top, right - left, bottom - top, 1, bottom - top);
+                var normalizedText = languageTag.StartsWith("ja", StringComparison.OrdinalIgnoreCase)
+                    ? line.Text.Replace(" ", string.Empty).Replace("　", string.Empty)
+                    : line.Text;
+                return new OcrLineRegion(normalizedText, left, top, right - left, bottom - top, 1, bottom - top);
             })
             .ToList();
         var rawText = string.Join(Environment.NewLine, lines.Select(line => line.Text));
@@ -168,7 +171,7 @@ public sealed class WindowsOcrService
             if (target is null) groups.Add([line]); else target.Add(line);
         }
 
-        return groups
+        var blocks = groups
             .Select(group =>
             {
                 var ordered = group.OrderBy(line => line.Y).ThenBy(line => line.X).ToList();
@@ -182,9 +185,15 @@ public sealed class WindowsOcrService
                     ordered.Count,
                     ordered.Average(line => line.TypicalLineHeight));
             })
-            .OrderBy(block => block.Y)
-            .ThenBy(block => block.X)
             .ToList();
+        if (!lines.Any(line => line.Text.EnumerateRunes().Any(rune => rune.Value is >= 0x3040 and <= 0x30FF)))
+            return blocks.OrderBy(block => block.Y).ThenBy(block => block.X).ToList();
+
+        var merged = PaddleOcrService.MergeAdjacentVerticalColumns(blocks);
+        var verticalCount = blocks.Count(block => block.Height > block.Width * 1.6);
+        return verticalCount >= 2 && verticalCount >= blocks.Count * 0.5
+            ? merged.OrderByDescending(block => block.X).ThenBy(block => block.Y).ToList()
+            : merged.OrderBy(block => block.Y).ThenBy(block => block.X).ToList();
     }
 
     private static bool CanJoin(IReadOnlyList<OcrLineRegion> group, OcrLineRegion line)

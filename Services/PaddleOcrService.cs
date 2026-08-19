@@ -13,14 +13,30 @@ namespace CustomImageViewer.Services;
 public sealed class PaddleOcrService : IDisposable
 {
     private readonly SemaphoreSlim _gate = new(1, 1);
-    private PaddleOcrAll? _engine;
+    private PaddleOcrAll? _japaneseEngine;
+    private PaddleOcrAll? _chineseEngine;
 
     public async Task<OcrTextResult> RecognizeAsync(string imagePath, CancellationToken cancellationToken)
     {
-        await _gate.WaitAsync(cancellationToken);
         try
         {
-            return await Task.Run(() => RecognizeCore(imagePath, cancellationToken), cancellationToken);
+            await _gate.WaitAsync(cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            return EmptyResult();
+        }
+
+        try
+        {
+            try
+            {
+                return await Task.Run(() => RecognizeCore(imagePath, cancellationToken), cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                return EmptyResult();
+            }
         }
         finally
         {
@@ -32,11 +48,11 @@ public sealed class PaddleOcrService : IDisposable
     {
         try
         {
-            cancellationToken.ThrowIfCancellationRequested();
+            if (cancellationToken.IsCancellationRequested) return EmptyResult();
             // Paddle 3.x's PP-OCRv5 PIR model currently fails in the Windows
             // oneDNN predictor. The stable 2.5 runtime + PP-OCRv4 model avoids
             // that converter while retaining local Chinese/Japanese OCR.
-            _engine ??= new PaddleOcrAll(LocalFullModels.ChineseV4, PaddleDevice.Mkldnn())
+            _japaneseEngine ??= new PaddleOcrAll(LocalFullModels.JapanV4, PaddleDevice.Mkldnn())
             {
                 AllowRotateDetection = true,
                 // Viewer images are already upright. Skipping the per-region
@@ -46,11 +62,47 @@ public sealed class PaddleOcrService : IDisposable
             using var image = Cv2.ImRead(imagePath, ImreadModes.Color);
             if (image.Empty()) return EmptyResult();
 
-            // Recognize several detected text crops in one predictor call. The
-            // default single-crop path is unnecessarily slow on text-heavy pages.
-            var result = _engine.Run(image, recognizeBatchSize: 8);
-            cancellationToken.ThrowIfCancellationRequested();
-            var lines = result.Regions
+            // Japanese must be recognized with the Japanese dictionary. The
+            // Chinese model maps kana to unrelated Han characters, leaving the
+            // translator with irrecoverably damaged source text.
+            var japanese = BuildTextResult(_japaneseEngine.Run(image, recognizeBatchSize: 8));
+            if (cancellationToken.IsCancellationRequested) return EmptyResult();
+
+            if (CountKana(japanese.Text) >= 2)
+                return japanese;
+
+            // Kana-free pages are commonly Chinese. Only those pages pay for a
+            // second recognition pass, keeping normal Japanese manga responsive.
+            _chineseEngine ??= new PaddleOcrAll(LocalFullModels.ChineseV4, PaddleDevice.Mkldnn())
+            {
+                AllowRotateDetection = true,
+                Enable180Classification = false
+            };
+            var chinese = BuildTextResult(_chineseEngine.Run(image, recognizeBatchSize: 8));
+            if (cancellationToken.IsCancellationRequested) return EmptyResult();
+            return string.IsNullOrWhiteSpace(chinese.Text) ? japanese : chinese;
+        }
+        catch (OperationCanceledException)
+        {
+            return EmptyResult();
+        }
+        catch
+        {
+            // Do not let a native predictor failure escape the worker task. Apart
+            // from presenting an intrusive debugger break, a faulted native engine
+            // cannot safely be reused. Returning an empty result activates the
+            // Windows OCR fallback in MainWindow.
+            _japaneseEngine?.Dispose();
+            _japaneseEngine = null;
+            _chineseEngine?.Dispose();
+            _chineseEngine = null;
+            return EmptyResult();
+        }
+    }
+
+    private static OcrTextResult BuildTextResult(PaddleOcrResult result)
+    {
+        var lines = result.Regions
                 .Where(region => region.Score >= 0.30f && !string.IsNullOrWhiteSpace(region.Text))
                 .Select(region =>
                 {
@@ -68,24 +120,9 @@ public sealed class PaddleOcrService : IDisposable
                 .ThenBy(line => line.X)
                 .ToList();
 
-            var blocks = GroupNearbyLines(lines);
-            var text = string.Join(Environment.NewLine + Environment.NewLine, blocks.Select(block => block.Text));
-            return new OcrTextResult(text, DetectLanguage(text), blocks);
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
-        catch
-        {
-            // Do not let a native predictor failure escape the worker task. Apart
-            // from presenting an intrusive debugger break, a faulted native engine
-            // cannot safely be reused. Returning an empty result activates the
-            // Windows OCR fallback in MainWindow.
-            _engine?.Dispose();
-            _engine = null;
-            return EmptyResult();
-        }
+        var blocks = GroupNearbyLines(lines);
+        var text = string.Join(Environment.NewLine + Environment.NewLine, blocks.Select(block => block.Text));
+        return new OcrTextResult(text, DetectLanguage(text), blocks);
     }
 
     private static OcrTextResult EmptyResult() => new(string.Empty, "und", []);
@@ -108,6 +145,9 @@ public sealed class PaddleOcrService : IDisposable
         return "en";
     }
 
+    private static int CountKana(string text) => text.EnumerateRunes().Count(rune =>
+        rune.Value is >= 0x3040 and <= 0x30FF);
+
     private static IReadOnlyList<OcrLineRegion> GroupNearbyLines(IReadOnlyList<OcrLineRegion> lines)
     {
         var groups = new List<List<OcrLineRegion>>();
@@ -120,7 +160,7 @@ public sealed class PaddleOcrService : IDisposable
             if (target is null) groups.Add([line]); else target.Add(line);
         }
 
-        return groups.Select(group =>
+        var blocks = groups.Select(group =>
         {
             var ordered = group.OrderBy(line => line.Y).ThenBy(line => line.X).ToList();
             var left = ordered.Min(line => line.X);
@@ -131,8 +171,96 @@ public sealed class PaddleOcrService : IDisposable
                 string.Join(Environment.NewLine, ordered.Select(line => line.Text)),
                 left, top, right - left, bottom - top, ordered.Count,
                 ordered.Average(line => line.TypicalLineHeight));
-        }).OrderBy(block => block.Y).ThenBy(block => block.X).ToList();
+        }).ToList();
+
+        // Japanese vertical text is read from the rightmost column to the left.
+        // Paddle returns those columns as tall regions; ordering them by Y/X would
+        // reverse the sentence and severely damage translation quality.
+        var verticalCount = blocks.Count(block => block.Height > block.Width * 1.6);
+        var mostlyVertical = verticalCount >= 2 && verticalCount >= blocks.Count * 0.6;
+        var mergedBlocks = MergeAdjacentVerticalColumns(blocks);
+        return mostlyVertical
+            ? mergedBlocks.OrderByDescending(block => block.X).ThenBy(block => block.Y).ToList()
+            : mergedBlocks.OrderBy(block => block.Y).ThenBy(block => block.X).ToList();
     }
+
+    internal static IReadOnlyList<OcrLineRegion> MergeAdjacentVerticalColumns(
+        IReadOnlyList<OcrLineRegion> blocks)
+    {
+        var vertical = blocks
+            .Where(IsVertical)
+            .OrderByDescending(block => block.X)
+            .ToList();
+        var output = blocks.Where(block => !IsVertical(block)).ToList();
+
+        while (vertical.Count > 0)
+        {
+            var group = new List<OcrLineRegion> { vertical[0] };
+            vertical.RemoveAt(0);
+            while (true)
+            {
+                var candidate = vertical
+                    .Where(item => CanJoinVerticalColumns(group, item))
+                    .OrderBy(item => HorizontalDistance(group, item))
+                    .FirstOrDefault();
+                if (candidate is null) break;
+                group.Add(candidate);
+                vertical.Remove(candidate);
+            }
+
+            var ordered = group.OrderByDescending(item => item.X).ThenBy(item => item.Y).ToList();
+            var left = ordered.Min(item => item.X);
+            var top = ordered.Min(item => item.Y);
+            var right = ordered.Max(item => item.X + item.Width);
+            var bottom = ordered.Max(item => item.Y + item.Height);
+            output.Add(new OcrLineRegion(
+                string.Concat(ordered.Select(item =>
+                    item.Text.Replace("\r", string.Empty).Replace("\n", string.Empty))),
+                left, top, right - left, bottom - top,
+                ordered.Sum(item => Math.Max(1, item.LineCount)),
+                ordered.Average(item => item.TypicalLineHeight)));
+        }
+
+        return output;
+    }
+
+    private static bool CanJoinVerticalColumns(
+        IReadOnlyList<OcrLineRegion> group,
+        OcrLineRegion candidate)
+    {
+        if (!IsVertical(candidate)) return false;
+        var left = group.Min(item => item.X);
+        var right = group.Max(item => item.X + item.Width);
+        var top = group.Min(item => item.Y);
+        var bottom = group.Max(item => item.Y + item.Height);
+        var overlap = Math.Max(0,
+            Math.Min(bottom, candidate.Y + candidate.Height) - Math.Max(top, candidate.Y));
+        var overlapRatio = overlap / Math.Max(1, Math.Min(bottom - top, candidate.Height));
+        var horizontalGap = candidate.X + candidate.Width < left
+            ? left - (candidate.X + candidate.Width)
+            : candidate.X > right
+                ? candidate.X - right
+                : 0;
+        var typicalWidth = Math.Max(
+            group.Average(item => item.Width),
+            candidate.Width);
+
+        // Columns in the same Japanese speech balloon normally overlap strongly
+        // on the Y axis and are separated by no more than roughly one character.
+        return overlapRatio >= 0.45 && horizontalGap <= Math.Max(8, typicalWidth * 1.35);
+    }
+
+    private static double HorizontalDistance(
+        IReadOnlyList<OcrLineRegion> group,
+        OcrLineRegion candidate)
+    {
+        var left = group.Min(item => item.X);
+        var right = group.Max(item => item.X + item.Width);
+        if (candidate.X + candidate.Width < left) return left - (candidate.X + candidate.Width);
+        return candidate.X > right ? candidate.X - right : 0;
+    }
+
+    private static bool IsVertical(OcrLineRegion block) => block.Height > block.Width * 1.6;
 
     private static bool CanJoin(IReadOnlyList<OcrLineRegion> group, OcrLineRegion line)
     {
@@ -149,7 +277,8 @@ public sealed class PaddleOcrService : IDisposable
 
     public void Dispose()
     {
-        _engine?.Dispose();
+        _japaneseEngine?.Dispose();
+        _chineseEngine?.Dispose();
         _gate.Dispose();
     }
 }
